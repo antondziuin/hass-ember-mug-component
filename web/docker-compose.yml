@@ -1,0 +1,16 @@
+services:
+  mug-history:
+    build: .
+    # Published on loopback only. Change this and you are exposing the database to your
+    # network, which is why the server also demands a token when HOST is not loopback.
+    ports:
+      - "127.0.0.1:41821:41821"
+    volumes:
+      - mugdata:/data
+    environment:
+      MUG_TOKEN: "${MUG_TOKEN:?set MUG_TOKEN to a long random string}"
+      AUTH_TOKEN: "${MUG_TOKEN}"
+    restart: unless-stopped
+
+volumes:
+  mugdata: {}

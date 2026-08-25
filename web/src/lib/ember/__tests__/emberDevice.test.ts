@@ -1,0 +1,386 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import {
+  DeviceModel,
+  LiquidState,
+  PushEventId,
+  TemperatureUnit,
+  VolumeLevel,
+} from '../constants.js';
+import { EmberDevice } from '../emberDevice.js';
+import { EmberError } from '../errors.js';
+import { memoryStore } from '../persistence.js';
+import { FakeBluetoothDevice } from '../testing/fakeGatt.js';
+import { Char } from '../uuids.js';
+
+let clock = 1_000_000;
+const now = (): number => clock;
+
+function makeDevice(options: Partial<ConstructorParameters<typeof FakeBluetoothDevice>[0]> = {}) {
+  const fake = new FakeBluetoothDevice({ model: DeviceModel.MUG_2_10_OZ, ...options });
+  const device = new EmberDevice(fake, { store: memoryStore(), now });
+  return { fake, device };
+}
+
+beforeEach(() => {
+  clock = 1_000_000;
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('connect', () => {
+  it('reads every supported attribute and reports the model', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+
+    const state = device.getSnapshot();
+    expect(state.connection.status).toBe('connected');
+    expect(state.attrs.currentTemp).toBeCloseTo(23.5, 2);
+    expect(state.attrs.targetTemp).toBeCloseTo(57, 2);
+    expect(state.attrs.battery).toEqual({ percent: 87, onChargingBase: false });
+    expect(state.attrs.liquidState).toBe(LiquidState.EMPTY);
+    expect(state.attrs.firmware).toEqual({ version: 355, hardware: 128, bootloader: 18 });
+    expect(state.attrs.meta?.serialNumber).toBe('AB12CD34EF');
+    expect(state.attrs.name).toBe('Ember');
+
+    // Never more than one GATT operation in flight, which is what Chrome enforces.
+    expect(fake.maxConcurrentOps).toBe(1);
+
+    device.destroy();
+  });
+
+  it('exposes unrecognised characteristics for the diagnostics report', async () => {
+    const { device } = makeDevice();
+    await device.connect();
+    expect(device.getSnapshot().unknownCharUuids).toContain(
+      '0000180a-0000-1000-8000-00805f9b34fb',
+    );
+    device.destroy();
+  });
+
+  it('derives capabilities from what the device really exposes', async () => {
+    const { device } = makeDevice();
+    await device.connect();
+    const caps = device.getSnapshot().capabilities;
+    expect(caps.has('ledColour')).toBe(true);
+    expect(caps.has('name')).toBe(true);
+    expect(caps.has('volumeLevel')).toBe(false);
+    device.destroy();
+  });
+
+  it('handles a Travel Mug: volume instead of LED, and a 0-100 liquid scale', async () => {
+    const { device } = makeDevice({ model: DeviceModel.TRAVEL_MUG_12_OZ });
+    await device.connect();
+
+    const state = device.getSnapshot();
+    expect(state.detection?.model).toBe(DeviceModel.TRAVEL_MUG_12_OZ);
+    expect(state.capabilities.has('volumeLevel')).toBe(true);
+    expect(state.capabilities.has('ledColour')).toBe(false);
+    expect(state.capabilities.has('batteryVoltage')).toBe(true);
+    expect(device.liquidLevelMax).toBe(100);
+    expect(state.attrs.volumeLevel).toBe(VolumeLevel.MEDIUM);
+
+    device.destroy();
+  });
+
+  it('does not offer a name control on a Cup', async () => {
+    const { device } = makeDevice({ model: DeviceModel.CUP_6_OZ, name: 'Ember Cup' });
+    await device.connect();
+    expect(device.getSnapshot().capabilities.has('name')).toBe(false);
+    await expect(device.setName('Nope')).rejects.toBeInstanceOf(EmberError);
+    device.destroy();
+  });
+});
+
+describe('writes', () => {
+  it('writes the target temperature and confirms it by read-back', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+
+    const result = await device.setTargetTemp(58.5);
+    expect(result.confirmed).toBe(true);
+    expect(device.getSnapshot().attrs.targetTemp).toBeCloseTo(58.5, 2);
+    expect(device.getSnapshot().writability).toBe('yes');
+
+    const written = fake.writeLog.filter((w) => w.id === Char.TARGET_TEMPERATURE).at(-1);
+    expect([...written!.bytes]).toEqual([0xda, 0x16]); // 5850, little-endian
+
+    device.destroy();
+  });
+
+  it('detects a device that acknowledges writes but ignores them', async () => {
+    const { device } = makeDevice({ writesAreIgnored: true });
+    await device.connect();
+
+    const result = await device.setTargetTemp(60);
+    expect(result.confirmed).toBe(false);
+    expect(device.getSnapshot().writability).toBe('no');
+    expect(device.getSnapshot().lastFailure).toMatchObject({ kind: 'not-writable' });
+    // The optimistic value must not be left behind after the read-back disagreed.
+    expect(device.getSnapshot().attrs.targetTemp).toBeCloseTo(57, 2);
+
+    device.destroy();
+  });
+
+  it('remembers the target across a temperature-control off/on cycle', async () => {
+    const { device } = makeDevice();
+    await device.connect();
+
+    await device.setTargetTemp(59);
+    await device.setTemperatureControl(false);
+    expect(device.getSnapshot().attrs.targetTemp).toBe(0);
+
+    await device.setTemperatureControl(true);
+    expect(device.getSnapshot().attrs.targetTemp).toBeCloseTo(59, 2);
+
+    device.destroy();
+  });
+
+  it('rejects an out-of-range target before touching the radio', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+    const writesBefore = fake.writeLog.length;
+
+    await expect(device.setTargetTemp(70)).rejects.toBeInstanceOf(EmberError);
+    expect(fake.writeLog.length).toBe(writesBefore);
+
+    device.destroy();
+  });
+
+  it('reverts the optimistic value when the write itself fails', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+    const before = device.getSnapshot().attrs.ledColour;
+
+    fake.failNext('write', 'NotSupportedError', 'GATT operation not permitted.');
+    await expect(
+      device.setLedColour({ red: 1, green: 2, blue: 3, brightness: 4 }),
+    ).rejects.toBeInstanceOf(EmberError);
+
+    expect(device.getSnapshot().attrs.ledColour).toEqual(before);
+    expect(device.getSnapshot().pending.size).toBe(0);
+
+    device.destroy();
+  });
+
+  it('writes the LED colour and the device unit', async () => {
+    const { device } = makeDevice();
+    await device.connect();
+
+    await device.setLedColour({ red: 244, green: 0, blue: 161, brightness: 255 });
+    expect(device.getSnapshot().attrs.ledColour).toEqual({
+      red: 244,
+      green: 0,
+      blue: 161,
+      brightness: 255,
+    });
+
+    await device.setTemperatureUnit(TemperatureUnit.FAHRENHEIT);
+    expect(device.getSnapshot().attrs.temperatureUnit).toBe(TemperatureUnit.FAHRENHEIT);
+
+    device.destroy();
+  });
+});
+
+describe('push events', () => {
+  it('re-reads the affected attribute after a coalescing delay', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+
+    fake.setTemperature(57.25);
+    fake.emitPushEvent(PushEventId.DRINK_TEMPERATURE_CHANGED);
+
+    // Nothing happens instantly: events are coalesced first.
+    expect(device.getSnapshot().attrs.currentTemp).toBeCloseTo(23.5, 2);
+
+    await vi.advanceTimersByTimeAsync(300);
+    expect(device.getSnapshot().attrs.currentTemp).toBeCloseTo(57.25, 2);
+
+    device.destroy();
+  });
+
+  it('applies a charger transition immediately, without waiting for a read', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+    expect(device.getSnapshot().attrs.battery?.onChargingBase).toBe(false);
+
+    fake.emitPushEvent(PushEventId.CHARGER_CONNECTED);
+    expect(device.getSnapshot().attrs.battery?.onChargingBase).toBe(true);
+    expect(device.getSnapshot().attrs.battery?.percent).toBe(87);
+
+    device.destroy();
+  });
+
+  it('debounces a repeat of the same event within five seconds', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+
+    const signals: string[] = [];
+    device.subscribeSignals((signal) => {
+      if (signal.type === 'push') signals.push(String(signal.id));
+    });
+
+    fake.emitPushEvent(PushEventId.LIQUID_STATE_CHANGED);
+    fake.emitPushEvent(PushEventId.LIQUID_STATE_CHANGED);
+    expect(signals).toHaveLength(1);
+
+    clock += 5001;
+    fake.emitPushEvent(PushEventId.LIQUID_STATE_CHANGED);
+    expect(signals).toHaveLength(2);
+
+    device.destroy();
+  });
+
+  it('treats a missing-auth-info event as definitively not writable', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+
+    fake.emitPushEvent(PushEventId.AUTH_INFO_NOT_FOUND);
+    expect(device.getSnapshot().authInfoMissing).toBe(true);
+    expect(device.getSnapshot().writability).toBe('no');
+
+    device.destroy();
+  });
+});
+
+describe('polling', () => {
+  it('reads the hot set frequently and everything on every sixth tick', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+
+    fake.setValue(Char.MUG_NAME, new TextEncoder().encode('Renamed'));
+    fake.setTemperature(41);
+
+    // One hot tick: temperature moves, the name does not.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(device.getSnapshot().attrs.currentTemp).toBeCloseTo(41, 2);
+    expect(device.getSnapshot().attrs.name).toBe('Ember');
+
+    // Five more ticks reaches the full sweep.
+    await vi.advanceTimersByTimeAsync(5_000 * 5);
+    expect(device.getSnapshot().attrs.name).toBe('Renamed');
+
+    device.destroy();
+  });
+
+  it('backs off to the idle cadence when standby and on the charger', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+
+    fake.setLiquidState(LiquidState.STANDBY);
+    fake.setBattery(90, true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(device.getSnapshot().attrs.battery?.onChargingBase).toBe(true);
+
+    fake.setTemperature(30);
+    // The next tick is now 30s away, so 10s of movement must not be picked up yet.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(device.getSnapshot().attrs.currentTemp).toBeCloseTo(23.5, 2);
+
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(device.getSnapshot().attrs.currentTemp).toBeCloseTo(30, 2);
+
+    device.destroy();
+  });
+
+  it('survives a transient read failure and keeps polling', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+
+    fake.failNext('read', 'NotSupportedError', 'GATT operation not permitted.');
+    fake.setTemperature(44);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(device.getSnapshot().attrs.currentTemp).toBeCloseTo(44, 2);
+    expect(device.getSnapshot().connection.status).toBe('connected');
+
+    device.destroy();
+  });
+});
+
+describe('disconnection', () => {
+  it('schedules a backoff reconnect and recovers', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    fake.simulateDisconnect();
+
+    const state = device.getSnapshot();
+    expect(state.connection.status).toBe('reconnecting');
+    if (state.connection.status === 'reconnecting') {
+      expect(state.connection.attempt).toBe(1);
+    }
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(device.getSnapshot().connection.status).toBe('connected');
+
+    randomSpy.mockRestore();
+    device.destroy();
+  });
+
+  it('keeps the last known values for a greyed-out UI after an intentional disconnect', async () => {
+    const { device } = makeDevice();
+    await device.connect();
+    const temp = device.getSnapshot().attrs.currentTemp;
+
+    await device.disconnect();
+
+    expect(device.getSnapshot().connection.status).toBe('disconnected');
+    expect(device.getSnapshot().attrs.currentTemp).toBe(temp);
+
+    device.destroy();
+  });
+
+  it('does not reconnect after an intentional disconnect', async () => {
+    const { device } = makeDevice();
+    await device.connect();
+    await device.disconnect();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(device.getSnapshot().connection.status).toBe('disconnected');
+
+    device.destroy();
+  });
+
+  it('emits connect and disconnect signals for the history recorder', async () => {
+    const { fake, device } = makeDevice();
+    const signals: string[] = [];
+    device.subscribeSignals((signal) => signals.push(signal.type));
+
+    await device.connect();
+    fake.simulateDisconnect();
+
+    expect(signals).toContain('connected');
+    expect(signals).toContain('disconnected');
+
+    device.destroy();
+  });
+});
+
+describe('model override', () => {
+  it('applies a user choice and persists it under the serial number', async () => {
+    const store = memoryStore();
+    const fake = new FakeBluetoothDevice({ model: DeviceModel.MUG_2_10_OZ });
+    const device = new EmberDevice(fake, { store, now });
+    await device.connect();
+
+    device.setModelOverride(DeviceModel.MUG_2_14_OZ);
+    expect(device.getSnapshot().detection?.model).toBe(DeviceModel.MUG_2_14_OZ);
+    expect(device.getSnapshot().detection?.source).toBe('user-override');
+    device.destroy();
+
+    // A fresh instance for the same serial picks the choice back up.
+    const again = new EmberDevice(new FakeBluetoothDevice({ model: DeviceModel.MUG_2_10_OZ }), {
+      store,
+      now,
+    });
+    await again.connect();
+    expect(again.getSnapshot().detection?.model).toBe(DeviceModel.MUG_2_14_OZ);
+    again.destroy();
+  });
+});

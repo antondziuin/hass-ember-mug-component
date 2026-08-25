@@ -1,0 +1,44 @@
+{
+  "name": "ember-mug-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-native monitoring, control and history for Ember Mugs over Web Bluetooth",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:cov": "vitest run --coverage",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "lint": "eslint .",
+    "db:dev": "node --experimental-sqlite --watch server/src/index.js",
+    "db:start": "npm run build && node --experimental-sqlite server/src/index.js --serve-static ./dist --open",
+    "db:export": "node --experimental-sqlite server/src/cli.js export"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "idb": "^8.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "uplot": "^1.6.31"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/web-bluetooth": "^0.0.20",
+    "@vitejs/plugin-react": "^4.3.3",
+    "@vitest/coverage-v8": "^2.1.4",
+    "fake-indexeddb": "^6.0.0",
+    "happy-dom": "^15.7.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4"
+  }
+}

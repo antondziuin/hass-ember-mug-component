@@ -1,0 +1,53 @@
+name: Deploy web app to Pages
+
+# The browser-storage and Supabase backends work from Pages; the local SQLite server does
+# not, because a page served over https cannot reliably reach http://localhost. For that,
+# run `npm run db:start` and open the server's own address instead.
+#
+# Requires Settings -> Pages -> Source: GitHub Actions.
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      # Same gate as CI: a broken build should not replace a working deployment.
+      - run: npm run typecheck
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      # Pages serves the site from /<repo>/, so asset URLs need that prefix.
+      # Derived from GITHUB_REPOSITORY, which is set for every event type.
+      - run: echo "VITE_BASE=/${GITHUB_REPOSITORY#*/}/" >> "$GITHUB_ENV"
+      - run: npm run build
+        working-directory: web
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -14,6 +14,11 @@ A custom integration for Ember Mugs, Cups, Tumblers and Travel Mugs for Home Ass
 If I missed one, or you have new feature ideas or issues, please [create an issue](https://github.com/sopelj/hass-ember-mug-component/issues) if it does not already exist.
 The actual device logic is in [an external library](https://github.com/sopelj/python-ember-mug) as per the guidelines in Home Assistant. So if you have an issue not specifically related to the Home Assistant part, please [raise the issue there instead](https://github.com/sopelj/python-ember-mug/issues) :)
 
+> **Not using Home Assistant?** [`web/`](./web) is a standalone browser app that talks to
+> the same mugs directly over Web Bluetooth — live readings, full control, and charted
+> history — with no Home Assistant and no Python. It needs Chrome, Edge or Opera on
+> desktop, or Chrome on Android. See [web/README.md](./web/README.md).
+
 | Device       | Tested |
 |--------------|--------|
 | Mug          | ✓      |
