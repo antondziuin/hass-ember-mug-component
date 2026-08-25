@@ -1,3 +1,25 @@
+# Ember Mug — Web App
+
+## ▶ [antondziuin.github.io/hass-ember-mug-component](https://antondziuin.github.io/hass-ember-mug-component/)
+
+Monitor and control an Ember mug straight from your browser over Web Bluetooth — live
+readings, every setting the mug exposes, and charted history. No Home Assistant, no
+Python, no phone app, nothing to install.
+
+**This is what this fork is for.** The Home Assistant integration below is upstream's work
+and is left untouched.
+
+Open the link in **Chrome, Edge or Opera** on desktop, or **Chrome on Android** — Firefox
+and Safari do not implement Web Bluetooth, so there is no version of the page that works in
+them. Take the mug off its charger, hold the button underneath until the light flashes
+blue, then press Connect.
+
+History is kept in your browser by default, and can be moved to a local SQLite server or to
+Supabase without losing anything. Setup, self-hosting and the limitations worth knowing
+before you rely on it: **[web/README.md](./web/README.md)**.
+
+---
+
 # [Ember Mug Integration for Home Assistant](https://github.com/sopelj/hass-ember-mug-component)
 
 [![GitHub Release](https://img.shields.io/github/release/sopelj/hass-ember-mug-component.svg?style=for-the-badge)](https://github.com/sopelj/hass-ember-mug-component/releases)
@@ -13,11 +35,6 @@
 A custom integration for Ember Mugs, Cups, Tumblers and Travel Mugs for Home Assistant. All known devices are tested and working.
 If I missed one, or you have new feature ideas or issues, please [create an issue](https://github.com/sopelj/hass-ember-mug-component/issues) if it does not already exist.
 The actual device logic is in [an external library](https://github.com/sopelj/python-ember-mug) as per the guidelines in Home Assistant. So if you have an issue not specifically related to the Home Assistant part, please [raise the issue there instead](https://github.com/sopelj/python-ember-mug/issues) :)
-
-> **Not using Home Assistant?** [`web/`](./web) is a standalone browser app that talks to
-> the same mugs directly over Web Bluetooth — live readings, full control, and charted
-> history — with no Home Assistant and no Python. It needs Chrome, Edge or Opera on
-> desktop, or Chrome on Android. See [web/README.md](./web/README.md).
 
 | Device       | Tested |
 |--------------|--------|

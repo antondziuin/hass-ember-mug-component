@@ -1,11 +1,17 @@
 # Ember Mug — browser app
 
+**Live: [antondziuin.github.io/hass-ember-mug-component](https://antondziuin.github.io/hass-ember-mug-component/)**
+
 Monitor and control an Ember mug directly from a browser over Web Bluetooth, and keep a
 history of temperature and battery with charts and statistics. No Home Assistant, no
 Python, no phone app.
 
 This lives alongside the Home Assistant integration in the same repository and shares its
 protocol knowledge, but it is an entirely separate program — the Python side is untouched.
+
+> The hosted build can use browser storage or Supabase. The local SQLite server is not
+> reachable from it — a page served over https cannot reliably talk to `http://localhost`.
+> For that, run it yourself as described below.
 
 ## Requirements
 
