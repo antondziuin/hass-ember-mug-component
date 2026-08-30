@@ -362,7 +362,7 @@ export class FakeBluetoothDevice extends SimpleEventTarget implements BluetoothD
     this.#stalled.add(op);
   }
 
-  unstall(op: 'read' | 'write'): void {
+  clearStall(op: 'read' | 'write'): void {
     this.#stalled.delete(op);
   }
 

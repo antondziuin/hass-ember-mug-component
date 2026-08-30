@@ -2,7 +2,7 @@
  * Beverage segmentation.
  *
  * Deliberately client-side and deliberately not part of any store: this is a heuristic
- * that will be retuned against real data, and baking it into three backends would
+ * that will be recalibrated against real data, and baking it into three backends would
  * guarantee three subtly different answers.
  */
 
