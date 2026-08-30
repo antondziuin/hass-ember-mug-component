@@ -176,6 +176,13 @@ export class EmberDevice {
   #diagnostics: DiagnosticEntry[] = [];
   #manufacturerData: DataView | null = null;
   #pageHideBound = false;
+  #lifecycleBound = false;
+  #adapterBound = false;
+  #adapterAvailable = true;
+  #releasedForPageHide = false;
+  #opening: Promise<void> | null = null;
+  #advertWatch: AbortController | null = null;
+  #advertListener: ((event: Event) => void) | null = null;
 
   constructor(device: BluetoothDeviceLike, options: EmberDeviceOptions = {}) {
     this.#device = device;
@@ -263,10 +270,24 @@ export class EmberDevice {
     await this.#openSession();
   }
 
+  /** Cancels the backoff timer and tries GATT immediately. */
+  async reconnectNow(): Promise<void> {
+    if (this.#destroyed || this.#intentionalDisconnect) return;
+    if (this.#state.connection.status === 'connected') return;
+    this.#autoReconnect = true;
+    this.#attempt = 0;
+    this.#clearReconnectTimer();
+    this.#stopAdvertWatch();
+    await this.#openSession().catch(() => {
+      // #openSession already scheduled the next attempt when auto-reconnect is on.
+    });
+  }
+
   async disconnect(): Promise<void> {
     this.#intentionalDisconnect = true;
     this.#autoReconnect = false;
     this.#clearTimers();
+    this.#stopAdvertWatch();
     await this.#unsubscribeNotifications();
     try {
       this.#device.gatt?.disconnect();
@@ -291,8 +312,15 @@ export class EmberDevice {
     }
     if (this.#pageHideBound && typeof window !== 'undefined') {
       window.removeEventListener('pagehide', this.#onPageHide);
+      window.removeEventListener('pageshow', this.#onPageShow);
       this.#pageHideBound = false;
     }
+    if (this.#lifecycleBound && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.#onVisibilityChange);
+      this.#lifecycleBound = false;
+    }
+    this.#unbindAdapter();
+    this.#stopAdvertWatch();
     try {
       this.#device.gatt?.disconnect();
     } catch {
@@ -305,6 +333,15 @@ export class EmberDevice {
 
   async #openSession(): Promise<void> {
     if (this.#destroyed) return;
+    if (this.#opening) return this.#opening;
+    this.#opening = this.#runOpenSession().finally(() => {
+      this.#opening = null;
+    });
+    return this.#opening;
+  }
+
+  async #runOpenSession(): Promise<void> {
+    if (this.#destroyed || this.#intentionalDisconnect) return;
 
     const gatt = this.#device.gatt;
     if (!gatt) {
@@ -323,10 +360,7 @@ export class EmberDevice {
 
     // Leaving the link open across a reload is what locks the Ember phone app out of the
     // mug afterwards, so it is released explicitly as the page goes away.
-    if (!this.#pageHideBound && typeof window !== 'undefined') {
-      window.addEventListener('pagehide', this.#onPageHide);
-      this.#pageHideBound = true;
-    }
+    this.#bindLifecycle();
 
     try {
       this.#server = await withTimeout(gatt.connect(), CONNECT_TIMEOUT_MS, 'connect');
@@ -334,12 +368,21 @@ export class EmberDevice {
       const failure: EmberFailure = { kind: 'connect-failed', attempt: this.#attempt, cause: error };
       this.#log('warn', 'Connection attempt failed', failure);
       this.#dispatch({ type: 'failure', failure });
-      if (this.#autoReconnect) {
+      if (this.#autoReconnect && !this.#intentionalDisconnect && !this.#destroyed) {
         this.#scheduleReconnect();
       } else {
         this.#dispatch({ type: 'connection', connection: { status: 'disconnected', failure } });
       }
       throw new EmberError(failure);
+    }
+
+    if (this.#destroyed || this.#intentionalDisconnect) {
+      try {
+        this.#device.gatt?.disconnect();
+      } catch {
+        // The page or the user already asked us to let go.
+      }
+      return;
     }
 
     this.#queue.reopen();
@@ -368,6 +411,7 @@ export class EmberDevice {
 
     this.#attempt = 0;
     this.#ticks = 0;
+    this.#stopAdvertWatch();
     this.#dispatch({ type: 'failure', failure: null });
     this.#dispatch({ type: 'connection', connection: { status: 'connected', since: this.#now() } });
     this.#emit({ type: 'connected', at: this.#now() });
@@ -416,14 +460,83 @@ export class EmberDevice {
     });
   }
 
+  #bindLifecycle(): void {
+    if (!this.#pageHideBound && typeof window !== 'undefined') {
+      window.addEventListener('pagehide', this.#onPageHide);
+      window.addEventListener('pageshow', this.#onPageShow);
+      this.#pageHideBound = true;
+    }
+    if (!this.#lifecycleBound && typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.#onVisibilityChange);
+      this.#lifecycleBound = true;
+    }
+    this.#bindAdapter();
+  }
+
   #onPageHide = (): void => {
+    this.#releasedForPageHide = true;
     this.#intentionalDisconnect = true;
     this.#autoReconnect = false;
+    this.#stopAdvertWatch();
     try {
       this.#device.gatt?.disconnect();
     } catch {
       // The page is going away regardless.
     }
+  };
+
+  #onPageShow = (): void => {
+    if (!this.#releasedForPageHide || this.#destroyed) return;
+    this.#releasedForPageHide = false;
+    this.#intentionalDisconnect = false;
+    this.#autoReconnect = true;
+    this.#attempt = 0;
+    void this.#openSession().catch(() => undefined);
+  };
+
+  #onVisibilityChange = (): void => {
+    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+    if (this.#destroyed || this.#intentionalDisconnect || !this.#autoReconnect) return;
+    const status = this.#state.connection.status;
+    if (status === 'connected' || status === 'connecting' || status === 'discovering') return;
+    this.#attempt = 0;
+    this.#clearReconnectTimer();
+    this.#stopAdvertWatch();
+    void this.#openSession().catch(() => undefined);
+  };
+
+  #bindAdapter(): void {
+    if (this.#adapterBound || typeof navigator === 'undefined') return;
+    const bluetooth = navigator.bluetooth as
+      | { addEventListener?: (type: string, listener: (event: Event) => void) => void }
+      | undefined;
+    if (typeof bluetooth?.addEventListener !== 'function') return;
+    bluetooth.addEventListener('availabilitychanged', this.#onAvailabilityChanged);
+    this.#adapterBound = true;
+  }
+
+  #unbindAdapter(): void {
+    if (!this.#adapterBound || typeof navigator === 'undefined') return;
+    const bluetooth = navigator.bluetooth as
+      | { removeEventListener?: (type: string, listener: (event: Event) => void) => void }
+      | undefined;
+    bluetooth?.removeEventListener?.('availabilitychanged', this.#onAvailabilityChanged);
+    this.#adapterBound = false;
+  }
+
+  #onAvailabilityChanged = (event: Event): void => {
+    const available = (event as Event & { value?: boolean }).value;
+    this.#adapterAvailable = available !== false;
+    if (!this.#adapterAvailable) {
+      this.#clearReconnectTimer();
+      this.#stopAdvertWatch();
+      this.#log('warn', 'Bluetooth adapter became unavailable');
+      return;
+    }
+    if (this.#destroyed || this.#intentionalDisconnect || !this.#autoReconnect) return;
+    if (this.#state.connection.status === 'connected') return;
+    this.#attempt = 0;
+    void this.#openSession().catch(() => undefined);
   };
 
   #onDisconnected = (): void => {
@@ -458,7 +571,8 @@ export class EmberDevice {
   }
 
   #scheduleReconnect(): void {
-    if (this.#destroyed || !this.#autoReconnect) return;
+    if (this.#destroyed || !this.#autoReconnect || this.#intentionalDisconnect) return;
+    if (!this.#adapterAvailable) return;
     const base =
       RECONNECT_BACKOFF_MS[Math.min(this.#attempt, RECONNECT_BACKOFF_MS.length - 1)] ?? 30_000;
     const delay = Math.round(base * (0.8 + Math.random() * 0.4));
@@ -467,12 +581,56 @@ export class EmberDevice {
       type: 'connection',
       connection: { status: 'reconnecting', attempt: this.#attempt, nextRetryAt: this.#now() + delay },
     });
+    this.#startAdvertWatch();
     this.#reconnectTimer = setTimeout(() => {
       this.#reconnectTimer = null;
+      this.#stopAdvertWatch();
       void this.#openSession().catch(() => {
         // #openSession already scheduled the next attempt.
       });
     }, delay);
+  }
+
+  #deviceCanWatchAdvertisements(): boolean {
+    return (
+      typeof (this.#device as { watchAdvertisements?: unknown }).watchAdvertisements === 'function'
+    );
+  }
+
+  #startAdvertWatch(): void {
+    if (this.#advertWatch || !this.#deviceCanWatchAdvertisements()) return;
+    const watchable = this.#device as BluetoothDeviceLike & {
+      watchAdvertisements: (init?: { signal?: AbortSignal }) => Promise<void>;
+    };
+    const controller = new AbortController();
+    this.#advertWatch = controller;
+    const onAdvert = (): void => {
+      if (this.#destroyed || !this.#autoReconnect || this.#intentionalDisconnect) return;
+      if (this.#state.connection.status !== 'reconnecting') return;
+      this.#log('info', 'Mug advertised; retrying immediately');
+      this.#clearReconnectTimer();
+      this.#stopAdvertWatch();
+      void this.#openSession().catch(() => undefined);
+    };
+    this.#advertListener = onAdvert;
+    this.#device.addEventListener('advertisementreceived', onAdvert);
+    watchable.watchAdvertisements({ signal: controller.signal }).catch(() => {
+      this.#stopAdvertWatch();
+    });
+  }
+
+  #stopAdvertWatch(): void {
+    if (this.#advertListener) {
+      this.#device.removeEventListener('advertisementreceived', this.#advertListener);
+      this.#advertListener = null;
+    }
+    this.#advertWatch?.abort();
+    this.#advertWatch = null;
+  }
+
+  #clearReconnectTimer(): void {
+    if (this.#reconnectTimer !== null) clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = null;
   }
 
   #clearTimers(): void {

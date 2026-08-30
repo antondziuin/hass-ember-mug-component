@@ -12,39 +12,45 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BatteryChart } from '../charts/BatteryChart.js';
 import { BrushStrip } from '../charts/BrushStrip.js';
 import { TemperatureChart } from '../charts/TemperatureChart.js';
-import { buildChartFrame, formatDuration, formatRange } from '../charts/frame.js';
+import { buildChartFrame } from '../charts/frame.js';
 import { pickBucket } from '../history/constants.js';
 import type { HistoryStore } from '../history/HistoryStore.js';
+import {
+  HISTORY_MODES,
+  canShiftHistoryWindow,
+  formatHistoryCaption,
+  isShiftableMode,
+  loadHistoryMode,
+  resolveHistoryWindow,
+  saveHistoryMode,
+  sessionOffsetOf,
+  type HistoryViewMode,
+  type HistoryWindow,
+} from '../history/ranges.js';
 import type {
   Aggregates,
   Bounds,
+  DeviceEvent,
   DeviceId,
   Millis,
   SeriesFrame,
   SessionRecord,
 } from '../history/types.js';
-import { celsiusToFahrenheit } from '../lib/ember/codecs.js';
 import { LIQUID_STATE_LABEL, LiquidState } from '../lib/ember/constants.js';
-import {
-  coolingRateCPerMin,
-  segmentBeverages,
-  summariseBeverages,
-} from '../stats/beverages.js';
+import { coolingRateCPerMin, segmentBeverages } from '../stats/beverages.js';
 
-import { Card, EmptyState, Spinner, Stat } from './components.js';
+import { Card, EmptyState, Spinner } from './components.js';
 import { useAppState } from './context.js';
-
-const RANGES = [
-  { id: '24h', label: '24 hours', ms: 86_400_000 },
-  { id: '7d', label: '7 days', ms: 7 * 86_400_000 },
-  { id: '30d', label: '30 days', ms: 30 * 86_400_000 },
-  { id: 'all', label: 'All time', ms: Number.POSITIVE_INFINITY },
-] as const;
+import { EventLog } from './history/EventLog.js';
+import { SessionList } from './history/SessionList.js';
+import { StatisticsPanel } from './history/StatisticsPanel.js';
 
 interface Loaded {
   frame: SeriesFrame;
   overview: SeriesFrame | null;
   sessions: SessionRecord[];
+  allSessions: SessionRecord[];
+  events: DeviceEvent[];
   aggregates: Aggregates;
   bounds: Bounds;
   rawForStats: ReturnType<typeof segmentBeverages>;
@@ -55,8 +61,10 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
   const state = useAppState();
   const deviceId = useDeviceId();
   const store = useHistoryStore();
-  const [rangeId, setRangeId] = useState<(typeof RANGES)[number]['id']>('24h');
-  const [window, setWindow] = useState<{ from: Millis; to: Millis } | null>(null);
+  const [mode, setMode] = useState<HistoryViewMode>(() => loadHistoryMode());
+  const [offset, setOffset] = useState(0);
+  const [revision, setRevision] = useState(0);
+  const [window, setWindow] = useState<HistoryWindow | null>(null);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -74,7 +82,7 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
   }, []);
 
   const load = useCallback(
-    async (target: { from: Millis; to: Millis } | null) => {
+    async (target: HistoryWindow | null) => {
       if (!store || !deviceId) return;
       setPending(true);
       setError(null);
@@ -85,21 +93,32 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
           return;
         }
 
-        const range = RANGES.find((r) => r.id === rangeId)!;
+        const now = Date.now();
+        const allSessions = await store.listSessions({
+          deviceId,
+          from: bounds.minTs,
+          to: Math.max(bounds.maxTs, now) + 1,
+        });
+
         const resolved =
           target ??
-          (range.ms === Number.POSITIVE_INFINITY
-            ? { from: bounds.minTs, to: bounds.maxTs + 1 }
-            : { from: Math.max(bounds.maxTs - range.ms, bounds.minTs), to: bounds.maxTs + 1 });
+          resolveHistoryWindow({
+            mode,
+            now,
+            bounds,
+            sessions: allSessions,
+            offset,
+            custom: window,
+          });
 
         const bucket = pickBucket(resolved.from, resolved.to, widthRef.current);
-        const [frame, sessions, aggregates] = await Promise.all([
+        const [frame, sessions, aggregates, events] = await Promise.all([
           store.queryRange({ deviceId, from: resolved.from, to: resolved.to, bucket }),
           store.listSessions({ deviceId, from: resolved.from, to: resolved.to }),
           store.aggregate({ deviceId, from: resolved.from, to: resolved.to }),
+          store.queryEvents({ deviceId, from: resolved.from, to: resolved.to, limit: 200 }),
         ]);
 
-        // The overview strip always shows everything, so the selection has context.
         const overview =
           bounds.maxTs - bounds.minTs > 0
             ? await store.queryRange({
@@ -111,7 +130,6 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
               })
             : null;
 
-        // Beverage segmentation and the cooling rate need raw rows, not buckets.
         const raw = await store.queryRange({
           deviceId,
           from: resolved.from,
@@ -126,6 +144,8 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
           frame,
           overview,
           sessions,
+          allSessions,
+          events,
           aggregates,
           bounds,
           rawForStats: segmentBeverages(rawSamples),
@@ -137,19 +157,22 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
         setPending(false);
       }
     },
-    [store, deviceId, rangeId],
+    [store, deviceId, mode, offset, window],
   );
 
   useEffect(() => {
-    void load(null);
-  }, [load]);
+    void load(mode === 'custom' ? window : null);
+    // `window` is written by load itself; re-resolve only when the user changes the preset.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store, deviceId, mode, offset, revision]);
 
-  // Refresh while connected, so the chart follows the mug rather than going stale.
   useEffect(() => {
     if (state.deviceState.connection.status !== 'connected') return undefined;
-    const timer = setInterval(() => void load(window), 30_000);
+    const timer = setInterval(() => {
+      void load(mode === 'custom' ? window : null);
+    }, 30_000);
     return () => clearInterval(timer);
-  }, [state.deviceState.connection.status, load, window]);
+  }, [state.deviceState.connection.status, load, mode, window]);
 
   const chartFrame = useMemo(
     () =>
@@ -161,6 +184,31 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
         : null,
     [loaded],
   );
+
+  const shift = loaded
+    ? canShiftHistoryWindow({
+        mode,
+        now: Date.now(),
+        bounds: loaded.bounds,
+        sessions: loaded.allSessions,
+        offset,
+        custom: window,
+      })
+    : { prev: false, next: false };
+
+  const selectMode = (next: HistoryViewMode): void => {
+    setMode(next);
+    setOffset(0);
+    setWindow(null);
+    setRevision((value) => value + 1);
+    saveHistoryMode(next);
+  };
+
+  const zoomTo = (from: Millis, to: Millis): void => {
+    setMode('custom');
+    setWindow({ from, to });
+    void load({ from, to });
+  };
 
   if (!deviceId) {
     return (
@@ -174,22 +222,46 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
     <div className="stack" ref={hostRef}>
       <Card
         title="History"
-        subtitle={window ? formatRange(window.from, window.to) : undefined}
+        subtitle={window ? formatHistoryCaption(mode, window) : undefined}
         actions={
-          <div className="segmented" role="group" aria-label="Range">
-            {RANGES.map((range) => (
-              <button
-                key={range.id}
-                type="button"
-                className={rangeId === range.id ? 'active' : ''}
-                onClick={() => {
-                  setRangeId(range.id);
-                  setWindow(null);
-                }}
-              >
-                {range.label}
+          <div className="history-toolbar">
+            <div className="segmented wrap" role="group" aria-label="Range">
+              {HISTORY_MODES.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className={mode === preset.id ? 'active' : ''}
+                  onClick={() => selectMode(preset.id)}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+            {isShiftableMode(mode) && (
+              <div className="row">
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!shift.prev}
+                  onClick={() => setOffset((value) => value + 1)}
+                >
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!shift.next}
+                  onClick={() => setOffset((value) => Math.max(value - 1, 0))}
+                >
+                  Next
+                </button>
+              </div>
+            )}
+            {mode === 'custom' && (
+              <button type="button" className="ghost" onClick={() => selectMode('today')}>
+                Reset
               </button>
-            ))}
+            )}
           </div>
         }
       >
@@ -207,7 +279,7 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
               frame={chartFrame}
               unit={unit}
               onRangeChange={(fromSeconds, toSeconds) => {
-                void load({ from: fromSeconds * 1000, to: toSeconds * 1000 });
+                zoomTo(fromSeconds * 1000, toSeconds * 1000);
               }}
             />
             <p className="muted small">
@@ -219,7 +291,7 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
                 frame={loaded.overview}
                 bounds={loaded.bounds}
                 selection={window}
-                onSelect={(from, to) => void load({ from, to })}
+                onSelect={(from, to) => zoomTo(from, to)}
               />
             )}
             <StateLegend />
@@ -232,10 +304,26 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
           <BatteryChart
             frame={chartFrame}
             onRangeChange={(fromSeconds, toSeconds) => {
-              void load({ from: fromSeconds * 1000, to: toSeconds * 1000 });
+              zoomTo(fromSeconds * 1000, toSeconds * 1000);
             }}
           />
         </Card>
+      )}
+
+      {loaded && window && (
+        <div className="history-split">
+          <SessionList
+            sessions={loaded.sessions}
+            selectedId={mode === 'session' ? pickSelectedSession(loaded.sessions) : null}
+            onSelect={(session) => {
+              setMode('session');
+              setOffset(sessionOffsetOf(loaded.allSessions, session.sessionId));
+              setWindow(null);
+              saveHistoryMode('session');
+            }}
+          />
+          <EventLog events={loaded.events} />
+        </div>
       )}
 
       {loaded && window && (
@@ -249,6 +337,13 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
       )}
     </div>
   );
+}
+
+function pickSelectedSession(sessions: readonly SessionRecord[]): string | null {
+  const open = sessions.find((session) => session.endedMs === null);
+  if (open) return open.sessionId;
+  const newest = [...sessions].sort((a, b) => b.startedMs - a.startedMs)[0];
+  return newest?.sessionId ?? null;
 }
 
 function StateLegend(): JSX.Element {
@@ -268,160 +363,6 @@ function StateLegend(): JSX.Element {
         </span>
       ))}
     </div>
-  );
-}
-
-function StatisticsPanel({
-  aggregates,
-  beverages,
-  coolingRate,
-  unit,
-  window,
-}: {
-  aggregates: Aggregates;
-  beverages: ReturnType<typeof segmentBeverages>;
-  coolingRate: number | null;
-  unit: 'C' | 'F';
-  window: { from: Millis; to: Millis };
-}): JSX.Element {
-  const summary = useMemo(() => summariseBeverages(beverages), [beverages]);
-  const days = Math.max((window.to - window.from) / 86_400_000, 1 / 24);
-  const observedDays = Math.max(aggregates.observedMs / 86_400_000, 1e-6);
-
-  const perfectMs = aggregates.msPerState[LiquidState.PERFECT] ?? 0;
-  const perfectShare =
-    aggregates.msLiquidPresent > 0 ? (perfectMs / aggregates.msLiquidPresent) * 100 : null;
-
-  const temp = (celsius: number | null): string =>
-    celsius === null
-      ? '--'
-      : `${(unit === 'F' ? celsiusToFahrenheit(celsius) : celsius).toFixed(1)}°${unit}`;
-
-  const hour = (value: number | null): string => {
-    if (value === null) return '--';
-    const h = Math.floor(value);
-    const m = Math.round((value - h) * 60);
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-  };
-
-  const longestPerfect = beverages.reduce((max, b) => Math.max(max, b.msAtPerfect), 0);
-  const cycles = aggregates.battery.dischargedPct / 100;
-  const favouriteTarget = aggregates.targetHistogram.reduce<{ targetC: number; ms: number } | null>(
-    (best, bin) => (best === null || bin.ms > best.ms ? bin : best),
-    null,
-  );
-
-  return (
-    <>
-      <Card
-        title="Coverage"
-        subtitle="How much of this period the app was actually watching."
-      >
-        <div className="coverage">
-          <div className="coverage-bar">
-            <span style={{ width: `${Math.min(aggregates.coverage * 100, 100)}%` }} />
-          </div>
-          <p className="muted">
-            Recorded for {formatDuration(aggregates.observedMs)} of{' '}
-            {formatDuration(window.to - window.from)} —{' '}
-            <strong>{(aggregates.coverage * 100).toFixed(0)}%</strong>. Per-day figures below are
-            counted over the recorded time only, so treat them as a floor rather than a total.
-          </p>
-        </div>
-      </Card>
-
-      <Card title="Thermal">
-        <div className="readings">
-          <Stat
-            label="Time at perfect temperature"
-            value={formatDuration(perfectMs)}
-            hint={perfectShare === null ? undefined : `${perfectShare.toFixed(0)}% of drinking time`}
-            tone="good"
-          />
-          <Stat
-            label="Time to reach target"
-            value={
-              summary.medianTimeToTargetMs === null
-                ? '--'
-                : formatDuration(summary.medianTimeToTargetMs)
-            }
-            hint="median, from filling"
-          />
-          <Stat
-            label="Cooling rate"
-            value={coolingRate === null ? '--' : `${coolingRate.toFixed(2)} °C/min`}
-            hint="off charger, control off"
-          />
-          <Stat
-            label="Favourite target"
-            value={favouriteTarget === null ? '--' : temp(favouriteTarget.targetC)}
-            hint={favouriteTarget === null ? undefined : formatDuration(favouriteTarget.ms)}
-          />
-          <Stat
-            label="Average pour temperature"
-            value={temp(summary.medianStartTempC)}
-            hint="median at fill"
-          />
-          <Stat label="Longest perfect streak" value={formatDuration(longestPerfect)} />
-          <Stat label="Hottest reading" value={temp(aggregates.temp.maxC)} />
-        </div>
-      </Card>
-
-      <Card title="Drinks">
-        <div className="readings">
-          <Stat
-            label="Drinks recorded"
-            value={summary.count}
-            hint={`${(summary.count / observedDays).toFixed(1)} per recorded day`}
-          />
-          <Stat
-            label="Average drink"
-            value={
-              summary.medianDurationMs === null ? '--' : formatDuration(summary.medianDurationMs)
-            }
-            hint="median, fill to empty"
-          />
-          <Stat
-            label="First drink"
-            value={hour(summary.medianFirstDrinkHour)}
-            hint={
-              summary.weekdayFirstDrinkHour === null
-                ? undefined
-                : `weekdays ${hour(summary.weekdayFirstDrinkHour)} · weekends ${hour(
-                    summary.weekendFirstDrinkHour,
-                  )}`
-            }
-          />
-          <Stat label="Sessions" value={aggregates.sessionCount} />
-        </div>
-      </Card>
-
-      <Card title="Power">
-        <div className="readings">
-          <Stat
-            label="Battery cycles"
-            value={`≈ ${cycles.toFixed(1)}`}
-            hint="total discharge ÷ 100%"
-          />
-          <Stat label="Time on charger" value={formatDuration(aggregates.msOnCharger)} />
-          <Stat
-            label="Off-charger time per day"
-            value={formatDuration(
-              Math.max(aggregates.observedMs - aggregates.msOnCharger, 0) / observedDays,
-            )}
-          />
-          <Stat
-            label="Temperature control on"
-            value={formatDuration(aggregates.msTempControlOn)}
-            hint={`${((aggregates.msTempControlOn / Math.max(aggregates.observedMs, 1)) * 100).toFixed(0)}% of recorded time`}
-          />
-        </div>
-        <p className="muted small">
-          Energy use is deliberately not shown: the mug has no current sensor, so any figure would
-          be invented. Averaged over {days.toFixed(1)} days of wall clock.
-        </p>
-      </Card>
-    </>
   );
 }
 

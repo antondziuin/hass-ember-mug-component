@@ -168,10 +168,12 @@ class FakeService implements GattServiceLike {
 
 class FakeGattServer implements GattServerLike {
   connected = false;
+  connectCalls = 0;
 
   constructor(private readonly device: FakeBluetoothDevice) {}
 
   async connect(): Promise<GattServerLike> {
+    this.connectCalls += 1;
     this.connected = true;
     return this;
   }
@@ -370,6 +372,18 @@ export class FakeBluetoothDevice extends SimpleEventTarget implements BluetoothD
 
   simulateDisconnect(): void {
     this.gatt.disconnect();
+  }
+
+  get connectCalls(): number {
+    return this.gatt.connectCalls;
+  }
+
+  async watchAdvertisements(_init?: { signal?: AbortSignal }): Promise<void> {
+    return;
+  }
+
+  simulateAdvertisement(): void {
+    this.dispatch('advertisementreceived', { target: this } as unknown as Event);
   }
 }
 

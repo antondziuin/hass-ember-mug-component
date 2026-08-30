@@ -9,6 +9,7 @@
 import { useState } from 'react';
 
 import { canSilentlyReconnect } from '../lib/ember/requestDevice.js';
+import { celsiusToFahrenheit } from '../lib/ember/codecs.js';
 import type { RememberedDevice } from '../lib/ember/types.js';
 import { LIQUID_STATE_LABEL, type LiquidState } from '../lib/ember/constants.js';
 
@@ -28,7 +29,7 @@ function relativeTime(ts: number): string {
   return `${days} day${days === 1 ? '' : 's'} ago`;
 }
 
-export function ConnectScreen(): JSX.Element {
+export function ConnectScreen({ unit }: { unit: 'C' | 'F' }): JSX.Element {
   const state = useAppState();
   const controller = useController();
   const [showFlagHelp, setShowFlagHelp] = useState(false);
@@ -64,7 +65,7 @@ export function ConnectScreen(): JSX.Element {
       )}
 
       {remembered ? (
-        <RememberedCard remembered={remembered} busy={state.busy} />
+        <RememberedCard remembered={remembered} busy={state.busy} unit={unit} />
       ) : (
         <Card
           title="Connect your Ember mug"
@@ -102,6 +103,13 @@ export function ConnectScreen(): JSX.Element {
         </Card>
       )}
 
+      {canSilentlyReconnect() && (
+        <p className="muted small">
+          This browser can reconnect without the picker. If the mug is already paired with this
+          site, the next visit will restore the link on its own.
+        </p>
+      )}
+
       {!canSilentlyReconnect() && (
         <Card
           title="Reconnect without the picker"
@@ -133,12 +141,18 @@ export function ConnectScreen(): JSX.Element {
 function RememberedCard({
   remembered,
   busy,
+  unit,
 }: {
   remembered: RememberedDevice;
   busy: boolean;
+  unit: 'C' | 'F';
 }): JSX.Element {
   const controller = useController();
   const { attrs } = remembered;
+  const temp =
+    attrs.currentTemp === undefined
+      ? '--'
+      : `${(unit === 'F' ? celsiusToFahrenheit(attrs.currentTemp) : attrs.currentTemp).toFixed(1)}°${unit}`;
 
   return (
     <Card
@@ -148,9 +162,7 @@ function RememberedCard({
       <div className="stale-readings" aria-hidden="true">
         <div>
           <span className="stat-label">Temperature</span>
-          <span className="stat-value">
-            {attrs.currentTemp === undefined ? '--' : `${attrs.currentTemp.toFixed(1)}°C`}
-          </span>
+          <span className="stat-value">{temp}</span>
         </div>
         <div>
           <span className="stat-label">State</span>

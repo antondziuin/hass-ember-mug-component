@@ -6,9 +6,10 @@
  * Travel Mug shows volume instead of an LED colour.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import {
+  CONNECT_FAILURES_BEFORE_HINT,
   DEFAULT_PRESETS,
   LIQUID_STATE_LABEL,
   LiquidState,
@@ -30,10 +31,9 @@ import { useAppState, useController } from './context.js';
 
 export interface LiveViewProps {
   unit: 'C' | 'F';
-  onUnitChange: (unit: 'C' | 'F') => void;
 }
 
-export function LiveView({ unit, onUnitChange }: LiveViewProps): JSX.Element {
+export function LiveView({ unit }: LiveViewProps): JSX.Element {
   const state = useAppState();
   const controller = useController();
   const device = state.device;
@@ -55,9 +55,14 @@ export function LiveView({ unit, onUnitChange }: LiveViewProps): JSX.Element {
     action().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
   };
 
+  const liquidLabel =
+    deviceState.attrs.liquidState === undefined || deviceState.attrs.liquidState === null
+      ? undefined
+      : LIQUID_STATE_LABEL[deviceState.attrs.liquidState];
+
   return (
     <div className="stack">
-      <ConnectionBanner state={deviceState} />
+      <ConnectionBanner state={deviceState} device={device} onDisconnect={() => void controller.disconnect()} />
 
       {deviceState.writability === 'no' && (
         <Banner
@@ -80,42 +85,33 @@ export function LiveView({ unit, onUnitChange }: LiveViewProps): JSX.Element {
         title={deviceState.attrs.name || deviceState.bleName || 'Ember mug'}
         subtitle={<ModelLine state={deviceState} />}
         actions={
-          <div className="row">
-            <div className="segmented" role="group" aria-label="Display unit">
-              {(['C', 'F'] as const).map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  className={unit === value ? 'active' : ''}
-                  onClick={() => onUnitChange(value)}
-                >
-                  °{value}
-                </button>
-              ))}
-            </div>
-            <button type="button" className="ghost" onClick={() => void controller.disconnect()}>
-              Disconnect
-            </button>
-          </div>
+          <button type="button" className="ghost" onClick={() => void controller.disconnect()}>
+            Disconnect
+          </button>
         }
       >
+        <div className={`hero${stale ? ' stale' : ''}`}>
+          <div>
+            <div className="hero-temp">{showTemp(deviceState.attrs.currentTemp)}</div>
+            <p className="muted small">Current temperature</p>
+          </div>
+          <div className="hero-meta">
+            {liquidLabel && (
+              <span
+                className={`chip-state${deviceState.attrs.liquidState === LiquidState.PERFECT ? ' good' : ''}`}
+              >
+                {liquidLabel}
+              </span>
+            )}
+            <span className="muted">
+              Target{' '}
+              {deviceState.attrs.targetTemp === 0 || deviceState.attrs.targetTemp === undefined
+                ? 'off'
+                : showTemp(deviceState.attrs.targetTemp)}
+            </span>
+          </div>
+        </div>
         <div className={`readings${stale ? ' stale' : ''}`}>
-          <Stat
-            label="Current"
-            value={showTemp(deviceState.attrs.currentTemp)}
-            hint={
-              deviceState.attrs.liquidState === undefined || deviceState.attrs.liquidState === null
-                ? undefined
-                : LIQUID_STATE_LABEL[deviceState.attrs.liquidState]
-            }
-            tone={deviceState.attrs.liquidState === LiquidState.PERFECT ? 'good' : 'default'}
-          />
-          <Stat
-            label="Target"
-            value={
-              deviceState.attrs.targetTemp === 0 ? 'Off' : showTemp(deviceState.attrs.targetTemp)
-            }
-          />
           <Stat
             label="Liquid"
             value={
@@ -176,16 +172,44 @@ export function LiveView({ unit, onUnitChange }: LiveViewProps): JSX.Element {
   );
 }
 
-function ConnectionBanner({ state }: { state: EmberDeviceState }): JSX.Element | null {
+function ConnectionBanner({
+  state,
+  device,
+  onDisconnect,
+}: {
+  state: EmberDeviceState;
+  device: EmberDevice;
+  onDisconnect: () => void;
+}): JSX.Element | null {
   const connection = state.connection;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (connection.status !== 'reconnecting') return undefined;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [connection.status]);
+
   if (connection.status === 'connected') return null;
 
+  const retry = (
+    <div className="row">
+      <button type="button" className="primary" onClick={() => void device.reconnectNow()}>
+        Retry now
+      </button>
+      <button type="button" className="ghost" onClick={onDisconnect}>
+        Give up
+      </button>
+    </div>
+  );
+
   if (connection.status === 'reconnecting') {
-    const seconds = Math.max(Math.round((connection.nextRetryAt - Date.now()) / 1000), 0);
+    const seconds = Math.max(Math.round((connection.nextRetryAt - now) / 1000), 0);
     return (
-      <Banner tone="warn" title="Reconnecting">
+      <Banner tone="warn" title="Reconnecting" action={retry}>
         Attempt {connection.attempt}; next try in {seconds}s.
-        {connection.attempt >= 3 && ' If the Ember phone app is connected, close it — the mug only accepts one connection at a time.'}
+        {connection.attempt >= CONNECT_FAILURES_BEFORE_HINT &&
+          ' If the Ember phone app is connected, close it — the mug only accepts one connection at a time.'}
       </Banner>
     );
   }
@@ -193,7 +217,7 @@ function ConnectionBanner({ state }: { state: EmberDeviceState }): JSX.Element |
     return <Banner tone="info">Connecting…</Banner>;
   }
   return (
-    <Banner tone="warn" title="Disconnected">
+    <Banner tone="warn" title="Disconnected" action={retry}>
       Showing the last readings received.
     </Banner>
   );
@@ -359,21 +383,34 @@ function LedControl({
 }): JSX.Element {
   const colour = state.attrs.ledColour;
   const hex = colour ? colourToHex(colour) : '#ffffff';
+  const [draft, setDraft] = useState(hex);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => setDraft(hex), [hex]);
+  useEffect(
+    () => () => {
+      if (timer.current !== null) clearTimeout(timer.current);
+    },
+    [],
+  );
 
   return (
     <Field label="LED colour" hint="The LED cannot be switched off, only recoloured.">
       <div className="row">
         <input
           type="color"
-          value={hex}
+          value={draft}
           disabled={state.writability === 'no'}
-          onChange={(event) =>
-            onRun(() =>
-              device.setLedColour(hexToColour(event.target.value, colour?.brightness ?? 255)),
-            )()
-          }
+          onChange={(event) => {
+            const next = event.target.value;
+            setDraft(next);
+            if (timer.current !== null) clearTimeout(timer.current);
+            timer.current = setTimeout(() => {
+              onRun(() => device.setLedColour(hexToColour(next, colour?.brightness ?? 255)))();
+            }, 280);
+          }}
         />
-        <code className="muted">{hex}</code>
+        <code className="muted">{draft}</code>
       </div>
     </Field>
   );

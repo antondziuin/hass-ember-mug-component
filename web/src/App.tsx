@@ -9,6 +9,11 @@ import { AppProvider, useAppState, useController } from './ui/context.js';
 
 type Tab = 'live' | 'history' | 'settings';
 const UNIT_KEY = 'ember.displayUnit';
+const TABS: ReadonlyArray<[Tab, string]> = [
+  ['live', 'Live'],
+  ['history', 'History'],
+  ['settings', 'Settings'],
+];
 
 export function App(): JSX.Element {
   return (
@@ -21,7 +26,7 @@ export function App(): JSX.Element {
 function Shell(): JSX.Element {
   const state = useAppState();
   const controller = useController();
-  const [tab, setTab] = useState<Tab>('live');
+  const [tab, setTab] = useState<Tab>(() => readTab());
   const [unit, setUnit] = useState<'C' | 'F'>(() => readUnit());
 
   useEffect(() => {
@@ -32,8 +37,24 @@ function Shell(): JSX.Element {
     }
   }, [unit]);
 
+  useEffect(() => {
+    const sync = (): void => setTab(readTab());
+    window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
+
+  const selectTab = (next: Tab): void => {
+    setTab(next);
+    const hash = `#${next}`;
+    if (window.location.hash !== hash) {
+      history.replaceState(null, '', hash);
+    }
+  };
+
   const connected = state.device !== null;
   const recording = state.recorder?.recording ?? false;
+  const connection = state.deviceState.connection;
+  const status = connectionStatus(connection, recording, state.recorder?.isLeader);
 
   return (
     <div className="app">
@@ -47,18 +68,12 @@ function Shell(): JSX.Element {
         </div>
 
         <nav className="tabs" aria-label="Sections">
-          {(
-            [
-              ['live', 'Live'],
-              ['history', 'History'],
-              ['settings', 'Settings'],
-            ] as const
-          ).map(([value, label]) => (
+          {TABS.map(([value, label]) => (
             <button
               key={value}
               type="button"
               className={tab === value ? 'active' : ''}
-              onClick={() => setTab(value)}
+              onClick={() => selectTab(value)}
               aria-current={tab === value ? 'page' : undefined}
             >
               {label}
@@ -66,15 +81,23 @@ function Shell(): JSX.Element {
           ))}
         </nav>
 
-        <div className="status" title={recording ? 'Recording history' : 'Not recording'}>
-          <span className={`dot${recording ? ' dot-live' : ''}`} aria-hidden="true" />
-          <span className="small muted">
-            {recording
-              ? `${state.recorder?.samplesWritten ?? 0} stored`
-              : state.recorder?.isLeader === false
-                ? 'Recording in another tab'
-                : 'Idle'}
-          </span>
+        <div className="app-tools">
+          <div className="segmented" role="group" aria-label="Display unit">
+            {(['C', 'F'] as const).map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={unit === value ? 'active' : ''}
+                onClick={() => setUnit(value)}
+              >
+                °{value}
+              </button>
+            ))}
+          </div>
+          <div className="status" title={status.title}>
+            <span className={`dot${status.dot}`} aria-hidden="true" />
+            <span className="small muted">{status.label}</span>
+          </div>
         </div>
       </header>
 
@@ -86,7 +109,11 @@ function Shell(): JSX.Element {
         )}
 
         {tab === 'live' &&
-          (connected ? <LiveView unit={unit} onUnitChange={setUnit} /> : <ConnectScreen />)}
+          (connected ? (
+            <LiveView unit={unit} />
+          ) : (
+            <ConnectScreen unit={unit} />
+          ))}
         {tab === 'history' && <HistoryView unit={unit} />}
         {tab === 'settings' && <SettingsView />}
       </main>
@@ -102,6 +129,39 @@ function Shell(): JSX.Element {
   );
 }
 
+function connectionStatus(
+  connection: { status: string; attempt?: number },
+  recording: boolean,
+  isLeader: boolean | undefined,
+): { label: string; title: string; dot: string } {
+  if (connection.status === 'connected') {
+    return {
+      label: recording ? 'Connected · recording' : 'Connected',
+      title: recording ? 'Recording history' : 'Connected',
+      dot: ' dot-live',
+    };
+  }
+  if (connection.status === 'reconnecting') {
+    return {
+      label: `Reconnecting · ${connection.attempt ?? 1}`,
+      title: 'Trying to restore the link',
+      dot: ' dot-warn',
+    };
+  }
+  if (connection.status === 'connecting' || connection.status === 'discovering') {
+    return { label: 'Connecting', title: 'Opening a Bluetooth session', dot: ' dot-warn' };
+  }
+  if (isLeader === false) {
+    return { label: 'Recording in another tab', title: 'This tab is not the writer', dot: '' };
+  }
+  return { label: 'Idle', title: 'Not recording', dot: '' };
+}
+
+function readTab(): Tab {
+  const hash = window.location.hash.replace(/^#/, '');
+  return hash === 'history' || hash === 'settings' || hash === 'live' ? hash : 'live';
+}
+
 function readUnit(): 'C' | 'F' {
   try {
     const stored = localStorage.getItem(UNIT_KEY);
@@ -109,7 +169,6 @@ function readUnit(): 'C' | 'F' {
   } catch {
     // Fall through to the locale guess.
   }
-  // Fahrenheit only where it is actually the everyday unit.
   const locale = typeof navigator === 'undefined' ? 'en-GB' : navigator.language;
   return /^en-(US|LR)|^my/i.test(locale) ? 'F' : 'C';
 }

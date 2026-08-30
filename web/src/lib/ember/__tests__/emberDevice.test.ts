@@ -343,7 +343,115 @@ describe('disconnection', () => {
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(device.getSnapshot().connection.status).toBe('disconnected');
+    await device.reconnectNow();
+    expect(device.getSnapshot().connection.status).toBe('disconnected');
 
+    device.destroy();
+  });
+
+  it('reconnectNow skips the backoff and restores the link', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+    fake.simulateDisconnect();
+    expect(device.getSnapshot().connection.status).toBe('reconnecting');
+
+    await device.reconnectNow();
+    expect(device.getSnapshot().connection.status).toBe('connected');
+
+    device.destroy();
+  });
+
+  it('does not open two GATT sessions at once', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+    fake.simulateDisconnect();
+
+    const first = device.reconnectNow();
+    const second = device.reconnectNow();
+    await Promise.all([first, second]);
+
+    expect(fake.connectCalls).toBe(2);
+    expect(device.getSnapshot().connection.status).toBe('connected');
+
+    device.destroy();
+  });
+
+  it('retries immediately when the tab becomes visible again', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+    fake.simulateDisconnect();
+    expect(device.getSnapshot().connection.status).toBe('reconnecting');
+
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(device.getSnapshot().connection.status).toBe('connected');
+
+    device.destroy();
+  });
+
+  it('reconnects after pagehide then pageshow without waiting for backoff', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+
+    window.dispatchEvent(new Event('pagehide'));
+    expect(device.getSnapshot().connection.status).toBe('disconnected');
+
+    window.dispatchEvent(new Event('pageshow'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(device.getSnapshot().connection.status).toBe('connected');
+    expect(fake.connectCalls).toBeGreaterThan(1);
+
+    device.destroy();
+  });
+
+  it('retries when the Bluetooth adapter reports it is back', async () => {
+    const listeners = new Set<(event: Event) => void>();
+    const bluetooth = {
+      addEventListener: (_type: string, listener: (event: Event) => void) => {
+        listeners.add(listener);
+      },
+      removeEventListener: (_type: string, listener: (event: Event) => void) => {
+        listeners.delete(listener);
+      },
+    };
+    vi.stubGlobal('navigator', { ...navigator, bluetooth });
+
+    const { fake, device } = makeDevice();
+    await device.connect();
+    fake.simulateDisconnect();
+    expect(device.getSnapshot().connection.status).toBe('reconnecting');
+
+    for (const listener of listeners) {
+      listener({ type: 'availabilitychanged', value: false } as Event & { value: boolean });
+    }
+    expect(device.getSnapshot().connection.status).toBe('reconnecting');
+
+    for (const listener of listeners) {
+      listener({ type: 'availabilitychanged', value: true } as Event & { value: boolean });
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(device.getSnapshot().connection.status).toBe('connected');
+
+    vi.unstubAllGlobals();
+    device.destroy();
+  });
+
+  it('wakes from an advertisement instead of waiting out the backoff', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    fake.simulateDisconnect();
+    expect(device.getSnapshot().connection.status).toBe('reconnecting');
+
+    fake.simulateAdvertisement();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(device.getSnapshot().connection.status).toBe('connected');
+
+    randomSpy.mockRestore();
     device.destroy();
   });
 
