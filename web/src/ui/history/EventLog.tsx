@@ -36,11 +36,9 @@ export function EventLog({ events }: { events: readonly DeviceEvent[] }): JSX.El
     .slice(0, 80);
 
   return (
-    <Card title="Events" subtitle="Fills, empties, charger and target changes in this window.">
+    <Card title="Events">
       {shown.length === 0 ? (
-        <EmptyState title="No events in this window">
-          Discrete changes are stored alongside the temperature samples.
-        </EmptyState>
+        <EmptyState title="No events" />
       ) : (
         <ul className="timeline">
           {shown.map((event) => (

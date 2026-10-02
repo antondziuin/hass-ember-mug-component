@@ -48,66 +48,69 @@ export function StatisticsPanel({
     null,
   );
 
-  return (
-    <>
-      <Card title="Coverage" subtitle="How much of this period the app was actually watching.">
-        <div className="coverage">
-          <div className="coverage-bar">
-            <span style={{ width: `${Math.min(aggregates.coverage * 100, 100)}%` }} />
-          </div>
-          <p className="muted">
-            Recorded for {formatDuration(aggregates.observedMs)} of {formatDuration(window.to - window.from)}{' '}
-            — <strong>{(aggregates.coverage * 100).toFixed(0)}%</strong>. Per-day figures below are
-            counted over the recorded time only, so treat them as a floor rather than a total.
-          </p>
-        </div>
-      </Card>
+  const coverage = Math.min(aggregates.coverage * 100, 100);
 
-      <Card title="Thermal">
+  return (
+    <Card
+      title="Statistics"
+      subtitle={`${aggregates.sessionCount} session${aggregates.sessionCount === 1 ? '' : 's'} over ${days.toFixed(1)} days`}
+    >
+      <div className="coverage" title="Rates count recorded time only, so treat them as a floor.">
+        <div className="row between small">
+          <span className="muted">Coverage</span>
+          <span>
+            {formatDuration(aggregates.observedMs)} of {formatDuration(window.to - window.from)} ·{' '}
+            <strong>{coverage.toFixed(0)}%</strong>
+          </span>
+        </div>
+        <div className="coverage-bar">
+          <span style={{ width: `${coverage}%` }} />
+        </div>
+      </div>
+
+      <section className="stat-group">
+        <h3>Temperature</h3>
         <div className="readings">
           <Stat
-            label="Time at perfect temperature"
+            label="At perfect"
             value={formatDuration(perfectMs)}
             hint={perfectShare === null ? undefined : `${perfectShare.toFixed(0)}% of drinking time`}
             tone="good"
           />
           <Stat
-            label="Time to reach target"
+            label="Time to target"
             value={
               summary.medianTimeToTargetMs === null ? '--' : formatDuration(summary.medianTimeToTargetMs)
             }
-            hint="median, from filling"
+            hint="median"
           />
           <Stat
             label="Cooling rate"
-            value={coolingRate === null ? '--' : `${coolingRate.toFixed(2)} °C/min`}
-            hint="off charger, control off"
+            value={coolingRate === null ? '--' : `${coolingRate.toFixed(2)}°/min`}
+            hint="off charger"
           />
           <Stat
             label="Favourite target"
             value={favouriteTarget === null ? '--' : temp(favouriteTarget.targetC)}
-            hint={favouriteTarget === null ? undefined : formatDuration(favouriteTarget.ms)}
           />
-          <Stat label="Average pour temperature" value={temp(summary.medianStartTempC)} hint="median at fill" />
-          <Stat label="Longest perfect streak" value={formatDuration(longestPerfect)} />
-          <Stat label="Hottest reading" value={temp(aggregates.temp.maxC)} />
+          <Stat label="Pour temperature" value={temp(summary.medianStartTempC)} hint="median" />
+          <Stat label="Longest perfect" value={formatDuration(longestPerfect)} />
+          <Stat label="Hottest" value={temp(aggregates.temp.maxC)} />
         </div>
-      </Card>
+      </section>
 
-      <Card
-        title="Drinks"
-        subtitle="Fill-to-empty cycles inferred from liquid level. Not the same as a Bluetooth session."
-      >
+      <section className="stat-group">
+        <h3>Drinks</h3>
         <div className="readings">
           <Stat
-            label="Drinks recorded"
+            label="Drinks"
             value={summary.count}
-            hint={`${(summary.count / observedDays).toFixed(1)} per recorded day`}
+            hint={`${(summary.count / observedDays).toFixed(1)} per day`}
           />
           <Stat
             label="Average drink"
             value={summary.medianDurationMs === null ? '--' : formatDuration(summary.medianDurationMs)}
-            hint="median, fill to empty"
+            hint="fill to empty"
           />
           <Stat
             label="First drink"
@@ -115,40 +118,30 @@ export function StatisticsPanel({
             hint={
               summary.weekdayFirstDrinkHour === null
                 ? undefined
-                : `weekdays ${hour(summary.weekdayFirstDrinkHour)} · weekends ${hour(
+                : `weekday ${hour(summary.weekdayFirstDrinkHour)} · weekend ${hour(
                     summary.weekendFirstDrinkHour,
                   )}`
             }
           />
         </div>
-      </Card>
+      </section>
 
-      <Card
-        title="Power"
-        subtitle={`${aggregates.sessionCount} Bluetooth session${aggregates.sessionCount === 1 ? '' : 's'} in this window.`}
-      >
+      <section className="stat-group">
+        <h3>Power</h3>
         <div className="readings">
+          <Stat label="Battery cycles" value={`≈ ${cycles.toFixed(1)}`} />
+          <Stat label="On charger" value={formatDuration(aggregates.msOnCharger)} />
           <Stat
-            label="Battery cycles"
-            value={`≈ ${cycles.toFixed(1)}`}
-            hint="total discharge ÷ 100%"
-          />
-          <Stat label="Time on charger" value={formatDuration(aggregates.msOnCharger)} />
-          <Stat
-            label="Off-charger time per day"
+            label="Off charger / day"
             value={formatDuration(Math.max(aggregates.observedMs - aggregates.msOnCharger, 0) / observedDays)}
           />
           <Stat
-            label="Temperature control on"
+            label="Heating on"
             value={formatDuration(aggregates.msTempControlOn)}
-            hint={`${((aggregates.msTempControlOn / Math.max(aggregates.observedMs, 1)) * 100).toFixed(0)}% of recorded time`}
+            hint={`${((aggregates.msTempControlOn / Math.max(aggregates.observedMs, 1)) * 100).toFixed(0)}% of recorded`}
           />
         </div>
-        <p className="muted small">
-          Energy use is deliberately not shown: the mug has no current sensor, so any figure would
-          be invented. Averaged over {days.toFixed(1)} days of wall clock.
-        </p>
-      </Card>
-    </>
+      </section>
+    </Card>
   );
 }

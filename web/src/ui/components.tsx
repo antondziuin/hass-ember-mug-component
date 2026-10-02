@@ -71,7 +71,7 @@ export function Banner({
       <div className="banner-actions">
         {action}
         {onDismiss && (
-          <button type="button" className="ghost" onClick={onDismiss} aria-label="Dismiss">
+          <button type="button" className="ghost icon" onClick={onDismiss} aria-label="Dismiss">
             ×
           </button>
         )}
@@ -95,7 +95,7 @@ export function Field({
     <label className="field">
       <span className="field-label">{label}</span>
       {children}
-      {error ? <span className="field-error">{error}</span> : hint ? <span className="muted small">{hint}</span> : null}
+      {error ? <span className="field-error">{error}</span> : hint ? <span className="field-hint">{hint}</span> : null}
     </label>
   );
 }
@@ -112,7 +112,6 @@ export function CopyBox({ value, label }: { value: string; label?: string }): JS
       <code>{value}</code>
       <button
         type="button"
-        className="ghost"
         onClick={() => {
           void navigator.clipboard?.writeText(value);
         }}
@@ -144,5 +143,29 @@ export function EmptyState({
       <strong>{title}</strong>
       {children && <p className="muted">{children}</p>}
     </div>
+  );
+}
+
+export function Switch({
+  checked,
+  onChange,
+  label,
+  disabled,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  label: string;
+  disabled?: boolean;
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      role="switch"
+      className="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+    />
   );
 }

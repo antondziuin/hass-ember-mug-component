@@ -23,11 +23,9 @@ export function SessionList({
   const ordered = [...sessions].sort((a, b) => b.startedMs - a.startedMs);
 
   return (
-    <Card title="Sessions" subtitle="Each row is one Bluetooth connection, not a drink.">
+    <Card title="Sessions" subtitle="Bluetooth connections">
       {ordered.length === 0 ? (
-        <EmptyState title="No connections in this window">
-          A session is recorded while this tab is open and the mug is in range.
-        </EmptyState>
+        <EmptyState title="No sessions" />
       ) : (
         <ul className="timeline">
           {ordered.map((session) => {
@@ -47,7 +45,7 @@ export function SessionList({
                   </span>
                   <span className="timeline-meta">
                     {formatDuration(duration)}
-                    {session.sampleCount > 0 ? ` · ${session.sampleCount} samples` : ''}
+                    {session.sampleCount > 0 ? ` · ${session.sampleCount} pts` : ''}
                   </span>
                 </button>
               </li>

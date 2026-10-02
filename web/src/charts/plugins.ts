@@ -9,12 +9,12 @@ import { LiquidState } from '../lib/ember/constants.js';
 
 /** Background tint per liquid state. Standby and empty are left unpainted. */
 export const STATE_COLOURS: Readonly<Record<number, string>> = {
-  [LiquidState.FILLING]: 'rgba(20, 184, 166, 0.16)',
-  [LiquidState.COLD_NO_CONTROL]: 'rgba(100, 116, 139, 0.14)',
-  [LiquidState.COOLING]: 'rgba(59, 130, 246, 0.16)',
-  [LiquidState.HEATING]: 'rgba(245, 158, 11, 0.18)',
-  [LiquidState.PERFECT]: 'rgba(16, 185, 129, 0.16)',
-  [LiquidState.WARM_NO_CONTROL]: 'rgba(148, 163, 184, 0.14)',
+  [LiquidState.FILLING]: 'rgba(20, 184, 166, 0.11)',
+  [LiquidState.COLD_NO_CONTROL]: 'rgba(100, 116, 139, 0.1)',
+  [LiquidState.COOLING]: 'rgba(59, 130, 246, 0.11)',
+  [LiquidState.HEATING]: 'rgba(245, 158, 11, 0.13)',
+  [LiquidState.PERFECT]: 'rgba(16, 185, 129, 0.11)',
+  [LiquidState.WARM_NO_CONTROL]: 'rgba(148, 163, 184, 0.1)',
 };
 
 const MAX_RECTS = 2000;

@@ -116,10 +116,7 @@ function StorageCard(): JSX.Element {
   const changed = JSON.stringify(build()) !== JSON.stringify(state.storeConfig);
 
   return (
-    <Card
-      title="Where history is stored"
-      subtitle={`Currently: ${describeStoreConfig(state.storeConfig)}`}
-    >
+    <Card title="Storage" subtitle={describeStoreConfig(state.storeConfig)}>
       <div className="segmented wide" role="group" aria-label="Storage backend">
         {(
           [
@@ -143,27 +140,20 @@ function StorageCard(): JSX.Element {
       </div>
 
       {kind === 'indexeddb' && (
-        <p className="muted">
-          Readings stay in this browser. Nothing leaves the machine — and nothing syncs to your
-          other devices either.
-        </p>
+        <p className="muted small">Stays on this device. Nothing is uploaded or synced.</p>
       )}
 
       {kind === 'server' && (
         <div className="stack">
-          <p className="muted">
-            A small Node process with a SQLite file. It also serves this app, which is the
-            supported way to use it: a page loaded from anywhere else is subject to Chrome&apos;s
-            local-network rules and may be blocked.
+          <p className="muted small">
+            SQLite via a small Node server. Open the app from that server — Chrome may block it
+            from other origins.
           </p>
-          <CopyBox value="npm run db:start" label="Copy command" />
+          <CopyBox value="npm run db:start" />
           <Field label="Server address">
             <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} />
           </Field>
-          <Field
-            label="Access token"
-            hint="Only needed if the server is not on localhost. It prints one on startup."
-          >
+          <Field label="Access token" hint="Only for non-localhost servers; printed on startup.">
             <input
               value={token}
               onChange={(event) => setToken(event.target.value)}
@@ -175,9 +165,9 @@ function StorageCard(): JSX.Element {
 
       {kind === 'supabase' && (
         <div className="stack">
-          <p className="muted">
-            Syncs across devices. Run <code>web/supabase/migrations/0001_init.sql</code> in the
-            project&apos;s SQL editor first, then sign in.
+          <p className="muted small">
+            Syncs across devices. Run <code>web/supabase/migrations/0001_init.sql</code> in the SQL
+            editor first.
           </p>
           <Field label="Project URL">
             <input
@@ -188,7 +178,7 @@ function StorageCard(): JSX.Element {
           </Field>
           <Field
             label="Anon key"
-            hint="This key is meant to be public. Row level security is what protects the data — never paste a service_role key here."
+            hint="The public key — never a service_role key."
           >
             <input value={anonKey} onChange={(event) => setAnonKey(event.target.value)} />
           </Field>
@@ -196,8 +186,8 @@ function StorageCard(): JSX.Element {
       )}
 
       <div className="row">
-        <button type="button" className="ghost" onClick={() => void test()} disabled={testing}>
-          {testing ? 'Testing…' : 'Test connection'}
+        <button type="button" onClick={() => void test()} disabled={testing}>
+          {testing ? 'Testing…' : 'Test'}
         </button>
         {changed && (
           <>
@@ -209,7 +199,7 @@ function StorageCard(): JSX.Element {
               className="ghost"
               onClick={() => void controller.setStoreConfig(build())}
             >
-              Switch without copying
+              Switch only
             </button>
           </>
         )}
@@ -219,8 +209,8 @@ function StorageCard(): JSX.Element {
         <Banner tone={probe.ok ? 'good' : 'error'}>
           {probe.ok ? (
             <>
-              Connected in {probe.latencyMs} ms.
-              {probe.usage?.rowCount !== undefined && ` ${probe.usage.rowCount} readings stored.`}
+              Connected · {probe.latencyMs} ms
+              {probe.usage?.rowCount !== undefined && ` · ${probe.usage.rowCount} readings`}
             </>
           ) : (
             <>
@@ -248,8 +238,7 @@ function MigrationProgress({ events }: { events: MigrationEvent[] }): JSX.Elemen
   if (failed && failed.type === 'failed') {
     return (
       <Banner tone="error" title="Copy stopped">
-        {failed.error} Nothing was lost — press &ldquo;Move history here&rdquo; again to carry on
-        from where it stopped.
+        {failed.error} Nothing was lost; run it again to resume.
       </Banner>
     );
   }
@@ -257,8 +246,8 @@ function MigrationProgress({ events }: { events: MigrationEvent[] }): JSX.Elemen
   if (done && done.type === 'done') {
     return (
       <Banner tone="good" title="Copied">
-        {done.rowsCopied} readings copied, {done.rowsDeduped} already there. Your local copy has
-        been kept as a backup — you can clear it below once you are happy.
+        {done.rowsCopied} copied, {done.rowsDeduped} already present. The local copy is kept as a
+        backup.
       </Banner>
     );
   }
@@ -295,20 +284,17 @@ function PersistenceCard(): JSX.Element {
   const quota = usage?.quota ? (usage.quota / 1024 / 1024).toFixed(0) : null;
 
   return (
-    <Card title="Browser storage">
+    <Card
+      title="Browser storage"
+      subtitle={used && quota ? `${used} MB of ~${quota} MB used` : undefined}
+    >
       {persisted === null ? (
         <Spinner />
       ) : persisted ? (
-        <p className="muted">
-          Storage is marked as persistent, so the browser will not clear it to reclaim space.
-          {used && quota && ` Using ${used} MB of about ${quota} MB.`}
-        </p>
+        <p className="muted small">Persistent — the browser won&apos;t clear it.</p>
       ) : (
-        <Banner tone="warn" title="Storage is not persistent">
-          The browser may clear this site&apos;s data at any time to reclaim space, taking the
-          history with it. Keeping using the app usually earns persistence automatically. Until
-          then, export a backup or connect a database.
-          {used && quota && ` Using ${used} MB of about ${quota} MB.`}
+        <Banner tone="warn" title="Not persistent">
+          The browser may clear history to free space. Export a backup or use a database.
         </Banner>
       )}
     </Card>
@@ -320,10 +306,7 @@ function RecordingCard({ preset }: { preset: GatePreset }): JSX.Element {
   const config = GATE_PRESETS[preset]!;
 
   return (
-    <Card
-      title="Recording detail"
-      subtitle="How much movement is needed before a reading is stored."
-    >
+    <Card title="Recording detail">
       <div className="segmented wide">
         {(Object.keys(GATE_PRESETS) as GatePreset[]).map((value) => (
           <button
@@ -336,11 +319,10 @@ function RecordingCard({ preset }: { preset: GatePreset }): JSX.Element {
           </button>
         ))}
       </div>
-      <p className="muted small">
-        Stores a reading when temperature moves {(config.tempDeltaCentiC / 100).toFixed(2)} °C,
-        battery moves {(config.batteryDeltaDpc / 10).toFixed(1)} %, the state changes, or every{' '}
-        {Math.round(config.heartbeatMs / 60_000)} minutes regardless. Applies from the next
-        connection.
+      <p className="subtle small">
+        Saves on ±{(config.tempDeltaCentiC / 100).toFixed(2)} °C, ±
+        {(config.batteryDeltaDpc / 10).toFixed(1)}% battery, a state change, or every{' '}
+        {Math.round(config.heartbeatMs / 60_000)} min. Applies on next connection.
       </p>
     </Card>
   );
@@ -379,7 +361,7 @@ function BackupCard(): JSX.Element {
         accepted += progress.rowsAccepted;
         deduped += progress.rowsDeduped;
       }
-      setMessage(`Restored ${accepted} rows, skipped ${deduped} already present.`);
+      setMessage(`Imported ${accepted} rows, skipped ${deduped} duplicates.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -403,13 +385,13 @@ function BackupCard(): JSX.Element {
   };
 
   return (
-    <Card title="Backup" subtitle="One file, one line per batch. Re-importing is always safe.">
+    <Card title="Backup" subtitle="NDJSON file. Re-importing is safe.">
       <div className="row">
-        <button type="button" className="ghost" disabled={busy} onClick={() => void download()}>
-          Export everything
+        <button type="button" disabled={busy} onClick={() => void download()}>
+          Export
         </button>
-        <label className="ghost button-like">
-          Restore from a file
+        <label className="button-like">
+          Import
           <input
             type="file"
             accept=".ndjson,.json,application/x-ndjson"
@@ -460,11 +442,9 @@ function DiagnosticsCard(): JSX.Element {
   return (
     <Card
       title="Diagnostics"
-      subtitle="Useful when a device is not recognised properly."
       actions={
         <button
           type="button"
-          className="ghost"
           disabled={!device}
           onClick={() => {
             void navigator.clipboard?.writeText(report());
@@ -477,13 +457,13 @@ function DiagnosticsCard(): JSX.Element {
       }
     >
       {!device ? (
-        <p className="muted">Connect a device to collect diagnostics.</p>
+        <p className="muted small">Connect a mug to collect diagnostics.</p>
       ) : (
         <>
           {state.deviceState.unknownCharUuids.length > 0 && (
             <p className="muted small">
-              This device exposes {state.deviceState.unknownCharUuids.length} characteristic(s)
-              this app does not recognise. Including them in a bug report helps.
+              {state.deviceState.unknownCharUuids.length} unrecognised characteristic(s) — worth
+              including in a bug report.
             </p>
           )}
           <pre className="log">

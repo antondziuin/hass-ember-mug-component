@@ -6,8 +6,6 @@
  * timestamp and one obvious button, rather than an empty skeleton that looks broken.
  */
 
-import { useState } from 'react';
-
 import { canSilentlyReconnect } from '../lib/ember/requestDevice.js';
 import { celsiusToFahrenheit } from '../lib/ember/codecs.js';
 import type { RememberedDevice } from '../lib/ember/types.js';
@@ -32,20 +30,13 @@ function relativeTime(ts: number): string {
 export function ConnectScreen({ unit }: { unit: 'C' | 'F' }): JSX.Element {
   const state = useAppState();
   const controller = useController();
-  const [showFlagHelp, setShowFlagHelp] = useState(false);
 
   if (state.unsupported) {
     return (
-      <Card title="This browser cannot talk to Bluetooth devices">
-        <p>{describeUnsupported(state.unsupported.reason)}</p>
-        <ul className="muted">
-          <li>Chrome, Edge or Opera on Windows, macOS, Linux or ChromeOS.</li>
-          <li>Chrome on Android.</li>
-          <li>On iOS, the Bluefy browser — Safari does not implement Web Bluetooth.</li>
-        </ul>
+      <Card title="Bluetooth unavailable" subtitle={describeUnsupported(state.unsupported.reason)}>
         <p className="muted small">
-          Firefox and Safari have both declined to implement the API, so there is no version of
-          this page that will work in them.
+          Use Chrome, Edge or Opera on desktop, Chrome on Android, or Bluefy on iOS. Firefox and
+          Safari do not support Web Bluetooth.
         </p>
       </Card>
     );
@@ -60,23 +51,20 @@ export function ConnectScreen({ unit }: { unit: 'C' | 'F' }): JSX.Element {
     <div className="stack">
       {!state.adapterAvailable && (
         <Banner tone="warn" title="Bluetooth is off">
-          Turn Bluetooth on, then try connecting again.
+          Turn it on and try again.
         </Banner>
       )}
 
       {remembered ? (
         <RememberedCard remembered={remembered} busy={state.busy} unit={unit} />
       ) : (
-        <Card
-          title="Connect your Ember mug"
-          subtitle="Everything happens in this browser — nothing is sent anywhere."
-        >
+        <Card title="Connect your mug" subtitle="Runs entirely in this browser.">
           <ol className="steps">
             <li>Take the mug off its charger.</li>
             <li>
-              Hold the button on the bottom until the light flashes <strong>blue</strong>.
+              Hold the bottom button until the light flashes <strong>blue</strong>.
             </li>
-            <li>Press Connect and pick the mug in the browser dialog.</li>
+            <li>Press Connect and pick the mug.</li>
           </ol>
           <div className="row">
             <button
@@ -85,7 +73,7 @@ export function ConnectScreen({ unit }: { unit: 'C' | 'F' }): JSX.Element {
               disabled={state.busy}
               onClick={() => void controller.connect()}
             >
-              {state.busy ? 'Waiting for the picker…' : 'Connect'}
+              {state.busy ? 'Waiting…' : 'Connect'}
             </button>
             <button
               type="button"
@@ -93,46 +81,24 @@ export function ConnectScreen({ unit }: { unit: 'C' | 'F' }): JSX.Element {
               disabled={state.busy}
               onClick={() => void controller.connect({ acceptAll: true })}
             >
-              My mug isn&apos;t listed
+              Show all devices
             </button>
           </div>
-          <p className="muted small">
-            If the phone app is connected to the mug, close it first — the mug accepts only one
-            connection at a time.
-          </p>
+          <p className="subtle small">Close the Ember phone app first — the mug allows one connection.</p>
         </Card>
-      )}
-
-      {canSilentlyReconnect() && (
-        <p className="muted small">
-          This browser can reconnect without the picker. If the mug is already paired with this
-          site, the next visit will restore the link on its own.
-        </p>
       )}
 
       {!canSilentlyReconnect() && (
-        <Card
-          title="Reconnect without the picker"
-          subtitle="Optional, and only if the dialog every reload gets tiresome."
-        >
-          {showFlagHelp ? (
-            <>
-              <p className="muted">
-                Chrome can remember Bluetooth permissions, but the feature is still behind a flag.
-                A page is not allowed to open a <code>chrome://</code> address, so copy this and
-                paste it into the address bar yourself:
-              </p>
-              <CopyBox value={PERMISSIONS_FLAG} />
-              <p className="muted small">
-                Set it to Enabled and restart Chrome. This page will then reconnect on its own.
-              </p>
-            </>
-          ) : (
-            <button type="button" className="ghost" onClick={() => setShowFlagHelp(true)}>
-              Show me how
-            </button>
-          )}
-        </Card>
+        <details className="disclosure">
+          <summary>Skip the device picker on reload</summary>
+          <div>
+            <p className="muted small">
+              Enable this Chrome flag, then restart Chrome. Pages can&apos;t open{' '}
+              <code>chrome://</code> links, so paste it into the address bar.
+            </p>
+            <CopyBox value={PERMISSIONS_FLAG} />
+          </div>
+        </details>
       )}
     </div>
   );
@@ -160,11 +126,11 @@ function RememberedCard({
       subtitle={`Last seen ${relativeTime(remembered.lastSeenAt)}`}
     >
       <div className="stale-readings" aria-hidden="true">
-        <div>
+        <div className="stat">
           <span className="stat-label">Temperature</span>
           <span className="stat-value">{temp}</span>
         </div>
-        <div>
+        <div className="stat">
           <span className="stat-label">State</span>
           <span className="stat-value">
             {attrs.liquidState === undefined || attrs.liquidState === null
@@ -172,7 +138,7 @@ function RememberedCard({
               : LIQUID_STATE_LABEL[attrs.liquidState as LiquidState]}
           </span>
         </div>
-        <div>
+        <div className="stat">
           <span className="stat-label">Battery</span>
           <span className="stat-value">
             {attrs.battery ? `${attrs.battery.percent}%` : '--'}
@@ -180,10 +146,6 @@ function RememberedCard({
         </div>
       </div>
 
-      <p className="muted">
-        These are the last readings from before the page reloaded. The browser will not let a page
-        reconnect on its own, so one press is needed.
-      </p>
       <div className="row">
         <button
           type="button"
@@ -199,14 +161,14 @@ function RememberedCard({
           disabled={busy}
           onClick={() => void controller.disconnect()}
         >
-          Forget this mug
+          Forget
         </button>
+        {remembered.bleName && (
+          <span className="subtle small">
+            Pick <strong>{remembered.bleName}</strong> in the dialog.
+          </span>
+        )}
       </div>
-      {remembered.bleName && (
-        <p className="muted small">
-          Pick <strong>{remembered.bleName}</strong> in the dialog.
-        </p>
-      )}
     </Card>
   );
 }
@@ -214,10 +176,10 @@ function RememberedCard({
 function describeUnsupported(reason: string): string {
   switch (reason) {
     case 'insecure-context':
-      return 'Web Bluetooth needs a secure page. Open this over https://, or from http://localhost.';
+      return 'Open this page over https:// or from localhost.';
     case 'no-adapter':
-      return 'No Bluetooth adapter was found. Check that Bluetooth is switched on.';
+      return 'No Bluetooth adapter found.';
     default:
-      return 'This browser does not implement the Web Bluetooth API.';
+      return 'This browser does not support Web Bluetooth.';
   }
 }
