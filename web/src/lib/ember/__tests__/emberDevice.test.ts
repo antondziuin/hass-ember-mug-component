@@ -185,6 +185,116 @@ describe('writes', () => {
   });
 });
 
+describe('optimistic writes', () => {
+  async function connectWithLatency(latencyMs: number) {
+    const made = makeDevice({ latencyMs });
+    const connecting = made.device.connect();
+    while (made.device.getSnapshot().connection.status !== 'connected') {
+      await vi.advanceTimersByTimeAsync(5);
+    }
+    await connecting;
+    return made;
+  }
+
+  it('writes only the newest of a burst and never flashes an older value', async () => {
+    // Issued straight after connecting, so the burst also races the writability probe.
+    const { fake, device } = await connectWithLatency(20);
+    const seen: number[] = [];
+    const writability: string[] = [];
+    device.subscribe(() => {
+      const state = device.getSnapshot();
+      seen.push(state.attrs.targetTemp ?? -1);
+      writability.push(state.writability);
+    });
+    const writesBefore = fake.writeLog.filter((w) => w.id === Char.TARGET_TEMPERATURE).length;
+
+    const results = [55, 56, 57.5, 59, 60].map((celsius) => device.setTargetTemp(celsius));
+    await vi.advanceTimersByTimeAsync(3_000);
+    const settled = await Promise.all(results);
+
+    expect(settled.every((r) => r.confirmed)).toBe(true);
+    expect(device.getSnapshot().attrs.targetTemp).toBeCloseTo(60, 2);
+    expect(device.getSnapshot().pending.size).toBe(0);
+    // Once the final value is on screen it stays there.
+    const shown = seen.findIndex((v) => Math.abs(v - 60) < 0.02);
+    expect(seen.slice(shown).every((v) => Math.abs(v - 60) < 0.02)).toBe(true);
+    expect(writability).not.toContain('no');
+
+    // The values in between were superseded before their turn and never sent.
+    const written = fake.writeLog
+      .filter((w) => w.id === Char.TARGET_TEMPERATURE)
+      .slice(writesBefore)
+      .map((w) => (w.bytes[0]! | (w.bytes[1]! << 8)) / 100);
+    for (const skipped of [56, 57.5, 59]) expect(written).not.toContain(skipped);
+    expect(written.at(-1)).toBe(60);
+
+    device.destroy();
+  });
+
+  it('ignores a poll value that was read before the user changed it', async () => {
+    const { device } = await connectWithLatency(20);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // A full sweep reads the target early and the rest afterwards.
+    const refreshing = device.refresh();
+    await vi.advanceTimersByTimeAsync(50);
+
+    const seen: number[] = [];
+    device.subscribe(() => seen.push(device.getSnapshot().attrs.targetTemp ?? -1));
+    const write = device.setTargetTemp(60);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await Promise.all([refreshing, write]);
+
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((v) => Math.abs(v - 60) < 0.02)).toBe(true);
+    device.destroy();
+  });
+
+  it('keeps a change made while disconnected and writes it after reconnecting', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    fake.simulateDisconnect();
+    const write = device.setTargetTemp(60);
+    expect(device.getSnapshot().attrs.targetTemp).toBeCloseTo(60, 2);
+    expect(device.getSnapshot().pending.has('targetTemp')).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    await expect(write).resolves.toEqual({ confirmed: true });
+    expect(device.getSnapshot().connection.status).toBe('connected');
+    expect([...fake.getValue(Char.TARGET_TEMPERATURE)!]).toEqual([0x70, 0x17]);
+    expect(device.getSnapshot().attrs.targetTemp).toBeCloseTo(60, 2);
+
+    randomSpy.mockRestore();
+    device.destroy();
+  });
+
+  it('drops unwritten changes when the user disconnects', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+    fake.simulateDisconnect();
+
+    const write = device.setTargetTemp(60);
+    await device.disconnect();
+
+    await expect(write).rejects.toBeInstanceOf(EmberError);
+    expect(device.getSnapshot().attrs.targetTemp).toBeCloseTo(57, 2);
+    device.destroy();
+  });
+
+  it('does not call a mug read-only on an auth event once writes are confirmed', async () => {
+    const { fake, device } = makeDevice();
+    await device.connect();
+    await device.setTargetTemp(58);
+    expect(device.getSnapshot().writability).toBe('yes');
+
+    fake.emitPushEvent(PushEventId.AUTH_INFO_NOT_FOUND);
+    expect(device.getSnapshot().writability).toBe('yes');
+    device.destroy();
+  });
+});
+
 describe('push events', () => {
   it('re-reads the affected attribute after a coalescing delay', async () => {
     const { fake, device } = makeDevice();

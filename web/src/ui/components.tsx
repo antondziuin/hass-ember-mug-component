@@ -1,4 +1,12 @@
-import type { ReactNode } from 'react';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { createPortal } from 'react-dom';
 
 export function Card({
   title,
@@ -168,4 +176,88 @@ export function Switch({
       onClick={() => onChange(!checked)}
     />
   );
+}
+
+const ToastHostContext = createContext<HTMLElement | null>(null);
+
+/**
+ * A fixed layer for transient messages.
+ *
+ * Toasts float over the page instead of being inserted into it, so a connection hiccup
+ * or a failed write never pushes the controls the user is reaching for out from under
+ * their finger.
+ */
+export function ToastHost({ children }: { children: ReactNode }): JSX.Element {
+  const [node, setNode] = useState<HTMLElement | null>(null);
+  return (
+    <ToastHostContext.Provider value={node}>
+      {children}
+      <div ref={setNode} className="toasts" aria-live="polite" />
+    </ToastHostContext.Provider>
+  );
+}
+
+export function Toast({
+  tone = 'info',
+  title,
+  children,
+  action,
+  onDismiss,
+  timeoutMs,
+}: {
+  tone?: 'info' | 'warn' | 'error' | 'good';
+  title?: ReactNode;
+  children?: ReactNode;
+  action?: ReactNode;
+  onDismiss?: () => void;
+  /** Dismisses itself after this long. Needs `onDismiss`. */
+  timeoutMs?: number;
+}): JSX.Element | null {
+  const host = useContext(ToastHostContext);
+  // Held in a ref so a parent re-render does not restart the countdown.
+  const dismiss = useRef(onDismiss);
+  dismiss.current = onDismiss;
+
+  useEffect(() => {
+    if (!timeoutMs) return undefined;
+    const timer = setTimeout(() => dismiss.current?.(), timeoutMs);
+    return () => clearTimeout(timer);
+  }, [timeoutMs]);
+
+  if (!host) return null;
+  return createPortal(
+    <div className={`toast toast-${tone}`} role={tone === 'error' ? 'alert' : 'status'}>
+      <span className="toast-dot" aria-hidden="true" />
+      <div className="toast-body">
+        {title && <strong>{title}</strong>}
+        {children && <span>{children}</span>}
+      </div>
+      {action && <div className="toast-actions">{action}</div>}
+      {onDismiss && (
+        <button type="button" className="toast-close" onClick={onDismiss} aria-label="Dismiss">
+          ×
+        </button>
+      )}
+    </div>,
+    host,
+  );
+}
+
+/**
+ * True once `active` has stayed true for `ms`.
+ *
+ * Used to keep momentary states off the screen: a link that drops and recovers within
+ * a second is not worth a message.
+ */
+export function useHeld(active: boolean, ms: number): boolean {
+  const [held, setHeld] = useState(false);
+  useEffect(() => {
+    if (!active) {
+      setHeld(false);
+      return undefined;
+    }
+    const timer = setTimeout(() => setHeld(true), ms);
+    return () => clearTimeout(timer);
+  }, [active, ms]);
+  return active && held;
 }

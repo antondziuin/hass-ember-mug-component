@@ -144,6 +144,34 @@ export interface EmberDeviceOptions {
 
 const DIAGNOSTIC_LIMIT = 200;
 const WRITE_PRIORITY = 10;
+/** Consecutive polls that read nothing before the link is treated as dead. */
+const DEAD_POLLS_BEFORE_RESET = 3;
+/** Extra attempts for a write that timed out while the link still looked up. */
+const WRITE_TIMEOUT_RETRIES = 1;
+
+interface Waiter {
+  resolve: (result: WriteResult) => void;
+  reject: (error: unknown) => void;
+}
+
+/**
+ * What the user last asked an attribute to be.
+ *
+ * Only the newest intent per attribute is ever written: a burst of slider moves becomes
+ * one write of the final value, and an intent made while the link is down is written as
+ * soon as it is back, instead of being thrown away.
+ */
+interface Intent {
+  value: unknown;
+  data: BufferSource;
+  char: CharId;
+  decode: (dv: DataView) => unknown;
+  equals: (a: unknown, b: unknown) => boolean;
+  /** The value the device is known to hold, restored if the write is refused. */
+  base: unknown;
+  waiters: Waiter[];
+  timeouts: number;
+}
 
 export class EmberDevice {
   readonly #device: BluetoothDeviceLike;
@@ -183,6 +211,11 @@ export class EmberDevice {
   #opening: Promise<void> | null = null;
   #advertWatch: AbortController | null = null;
   #advertListener: ((event: Event) => void) | null = null;
+  #intents = new Map<Attribute, Intent>();
+  #flushing = new Set<Attribute>();
+  /** Bumped on every user intent, so a read issued before it can be recognised as stale. */
+  #epochs = new Map<Attribute, number>();
+  #deadPolls = 0;
 
   constructor(device: BluetoothDeviceLike, options: EmberDeviceOptions = {}) {
     this.#device = device;
@@ -297,6 +330,7 @@ export class EmberDevice {
     this.#queue.close({ kind: 'disconnected', unexpected: false });
     this.#server = null;
     this.#chars = null;
+    this.#abandonIntents({ kind: 'disconnected', unexpected: false });
     this.#dispatch({ type: 'connection', connection: { status: 'disconnected', failure: null } });
     this.#emit({ type: 'disconnected', at: this.#now(), unexpected: false });
   }
@@ -327,6 +361,7 @@ export class EmberDevice {
       // Nothing to do.
     }
     this.#queue.close({ kind: 'disconnected', unexpected: false });
+    this.#abandonIntents({ kind: 'disconnected', unexpected: false });
     this.#listeners.clear();
     this.#signalListeners.clear();
   }
@@ -365,11 +400,18 @@ export class EmberDevice {
     try {
       this.#server = await withTimeout(gatt.connect(), CONNECT_TIMEOUT_MS, 'connect');
     } catch (error) {
+      // A timed-out connect may still be pending inside the browser; cancel it so the
+      // next attempt starts clean instead of queueing behind it.
+      try {
+        gatt.disconnect();
+      } catch {
+        // Nothing was open.
+      }
       const failure: EmberFailure = { kind: 'connect-failed', attempt: this.#attempt, cause: error };
       this.#log('warn', 'Connection attempt failed', failure);
       this.#dispatch({ type: 'failure', failure });
       if (this.#autoReconnect && !this.#intentionalDisconnect && !this.#destroyed) {
-        this.#scheduleReconnect();
+        if (this.#reconnectTimer === null) this.#scheduleReconnect();
       } else {
         this.#dispatch({ type: 'connection', connection: { status: 'disconnected', failure } });
       }
@@ -388,7 +430,29 @@ export class EmberDevice {
     this.#queue.reopen();
     this.#dispatch({ type: 'connection', connection: { status: 'discovering' } });
 
-    this.#chars = await buildCharIndex(this.#server, this.#queue);
+    try {
+      await this.#setUpSession(this.#server);
+    } catch (error) {
+      if (this.#destroyed || this.#intentionalDisconnect) return;
+      // Discovery or the first reads failed on a link that did open. Drop it and go
+      // round again rather than sitting in "discovering" forever.
+      const failure = error instanceof EmberError ? error.failure : classify(error, 'setup');
+      this.#log('warn', 'Session setup failed; reconnecting', failure);
+      this.#queue.close({ kind: 'disconnected', unexpected: true });
+      this.#server = null;
+      this.#chars = null;
+      try {
+        gatt.disconnect();
+      } catch {
+        // Already down.
+      }
+      if (this.#autoReconnect && this.#reconnectTimer === null) this.#scheduleReconnect();
+      throw error instanceof EmberError ? error : new EmberError(failure);
+    }
+  }
+
+  async #setUpSession(server: GattServerLike): Promise<void> {
+    this.#chars = await buildCharIndex(server, this.#queue);
     this.#dispatch({ type: 'unknown-chars', uuids: this.#chars.unknownCharUuids });
     if (this.#chars.present.size === 0) {
       this.#log('error', 'No known Ember characteristics were found on this device.');
@@ -409,8 +473,12 @@ export class EmberDevice {
 
     await this.#readAttributes(this.#capableAttrs(POLL_ATTRS));
 
+    if (this.#destroyed || this.#intentionalDisconnect) return;
+
     this.#attempt = 0;
     this.#ticks = 0;
+    this.#deadPolls = 0;
+    this.#clearReconnectTimer();
     this.#stopAdvertWatch();
     this.#dispatch({ type: 'failure', failure: null });
     this.#dispatch({ type: 'connection', connection: { status: 'connected', since: this.#now() } });
@@ -418,6 +486,8 @@ export class EmberDevice {
     this.#log('info', 'Connected');
     this.#remember();
     this.#scheduleTick();
+    // Anything the user changed while the link was down goes out first.
+    this.#flushAllIntents();
     void this.#probeWritability();
   }
 
@@ -540,24 +610,30 @@ export class EmberDevice {
   };
 
   #onDisconnected = (): void => {
-    this.#clearTimers();
+    const wasConnected = this.#state.connection.status === 'connected';
+    this.#clearPollTimers();
     this.#chars = null;
     this.#server = null;
     this.#debouncer.reset();
     this.#queue.close({ kind: 'disconnected', unexpected: !this.#intentionalDisconnect });
-    this.#remember();
-    this.#emit({
-      type: 'disconnected',
-      at: this.#now(),
-      unexpected: !this.#intentionalDisconnect,
-    });
+    if (wasConnected) {
+      this.#remember();
+      this.#emit({
+        type: 'disconnected',
+        at: this.#now(),
+        unexpected: !this.#intentionalDisconnect,
+      });
+    }
 
     if (this.#intentionalDisconnect || !this.#autoReconnect || this.#destroyed) {
+      this.#clearReconnectTimer();
       this.#dispatch({ type: 'connection', connection: { status: 'disconnected', failure: null } });
       return;
     }
 
-    this.#log('warn', 'Disconnected unexpectedly');
+    // A failed attempt that cancelled itself has already queued the next one.
+    if (this.#reconnectTimer !== null) return;
+    if (wasConnected) this.#log('warn', 'Disconnected unexpectedly');
     this.#scheduleReconnect();
   };
 
@@ -633,13 +709,17 @@ export class EmberDevice {
     this.#reconnectTimer = null;
   }
 
-  #clearTimers(): void {
-    for (const timer of [this.#pollTimer, this.#reconnectTimer, this.#coalesceTimer]) {
+  #clearPollTimers(): void {
+    for (const timer of [this.#pollTimer, this.#coalesceTimer]) {
       if (timer !== null) clearTimeout(timer);
     }
     this.#pollTimer = null;
-    this.#reconnectTimer = null;
     this.#coalesceTimer = null;
+  }
+
+  #clearTimers(): void {
+    this.#clearPollTimers();
+    this.#clearReconnectTimer();
   }
 
   // --- notifications ------------------------------------------------------
@@ -722,6 +802,12 @@ export class EmberDevice {
     }
 
     if (id === PushEventId.AUTH_INFO_NOT_FOUND) {
+      // A write has already been read back intact, so the device evidently does accept
+      // them; the event alone is not worth telling the user the mug is read-only.
+      if (this.#state.writability === 'yes') {
+        this.#log('debug', 'Auth-info event ignored: writes are confirmed to work');
+        return;
+      }
       this.#dispatch({ type: 'auth-info-missing' });
       this.#dispatch({ type: 'failure', failure: { kind: 'not-writable', hint: 'setup-in-ember-app' } });
       this.#log('warn', 'Device reports no auth info; writes will be ignored');
@@ -785,8 +871,17 @@ export class EmberDevice {
     const attrs = this.#capableAttrs([...new Set([...dirty, ...wanted])]);
 
     try {
-      await this.#readAttributes(attrs);
+      const read = await this.#readAttributes(attrs);
       if (full) this.#remember();
+      this.#deadPolls = attrs.length > 0 && read === 0 ? this.#deadPolls + 1 : 0;
+      if (this.#deadPolls >= DEAD_POLLS_BEFORE_RESET) {
+        // The link claims to be up but nothing comes back: reset it rather than show
+        // frozen numbers as if they were live.
+        this.#deadPolls = 0;
+        this.#log('warn', 'Polls keep failing; resetting the link');
+        this.#onQueueFatal({ kind: 'timeout', op: 'poll', ms: 0 });
+        return;
+      }
     } catch (error) {
       this.#noteReadFailure(error, 'poll');
     } finally {
@@ -843,10 +938,11 @@ export class EmberDevice {
    * Reads attributes one at a time, tolerating individual failures the way the reference
    * implementation does - a single unreadable characteristic must not abort the sweep.
    */
-  async #readAttributes(attrs: readonly Attribute[]): Promise<void> {
-    if (attrs.length === 0) return;
+  async #readAttributes(attrs: readonly Attribute[]): Promise<number> {
+    if (attrs.length === 0) return 0;
     const updates: Partial<EmberAttributes> = {};
     const failed: Attribute[] = [];
+    const epochs = new Map(attrs.map((attr) => [attr, this.#epochs.get(attr) ?? 0]));
 
     for (const attr of attrs) {
       const reader = READERS[attr];
@@ -860,19 +956,33 @@ export class EmberDevice {
       }
     }
 
+    const read = Object.keys(updates).length;
+
+    // A sweep is many round-trips long and a write can land in the middle of it. A value
+    // read before the user changed that attribute is history, not news: applying it
+    // would flash the old value back on screen.
+    for (const attr of Object.keys(updates) as Attribute[]) {
+      if (this.#intents.has(attr) || (this.#epochs.get(attr) ?? 0) !== epochs.get(attr)) {
+        delete (updates as Record<string, unknown>)[attr];
+      }
+    }
+
     if (Object.keys(updates).length > 0) {
       this.#dispatch({ type: 'attrs', attrs: updates, at: this.#now() });
     }
     if (failed.length > 0) {
       this.#log('debug', `Could not read: ${failed.join(', ')}`);
     }
+    return read;
   }
 
   /**
-   * Writes, then reads back and compares.
+   * Records what the user asked for, shows it immediately, and writes it in the background.
    *
-   * A device that was never set up in the Ember app acknowledges the write at the GATT
-   * layer and silently discards it, so read-back is the only reliable detection.
+   * Every write is read back: a device that was never set up in the Ember app
+   * acknowledges the write at the GATT layer and silently discards it, so read-back is
+   * the only reliable detection. The promise settles once the device holds the value
+   * (or a newer intent replaced it), so callers can await it but never have to.
    */
   async #writeAttr<T>(
     attr: Attribute,
@@ -885,33 +995,111 @@ export class EmberDevice {
     if (!this.#state.capabilities.has(attr)) {
       throw new EmberError({ kind: 'unsupported-attribute', attribute: attr });
     }
+    if (this.#intentionalDisconnect || this.#destroyed) {
+      throw new EmberError({ kind: 'disconnected', unexpected: false });
+    }
 
     // Validation happens before anything touches the radio.
     const data = encode(value);
-    const previous = this.#state.attrs[attr as keyof EmberAttributes] as T | undefined;
+    const existing = this.#intents.get(attr);
 
+    const result = new Promise<WriteResult>((resolve, reject) => {
+      this.#intents.set(attr, {
+        value,
+        data,
+        char: id,
+        decode: decode as (dv: DataView) => unknown,
+        equals: equals as (a: unknown, b: unknown) => boolean,
+        base: existing ? existing.base : this.#state.attrs[attr as keyof EmberAttributes],
+        // Superseded callers settle with the newest intent: it is what they now mean.
+        waiters: [...(existing?.waiters ?? []), { resolve, reject }],
+        timeouts: 0,
+      });
+    });
+
+    this.#epochs.set(attr, (this.#epochs.get(attr) ?? 0) + 1);
     this.#dispatch({ type: 'optimistic', attr, value });
-    try {
-      await this.#write(id, data);
-      const actual = decode(await this.#read(id, WRITE_PRIORITY));
-      const confirmed = equals(actual, value);
+    void this.#flush(attr);
+    return result;
+  }
 
-      this.#dispatch({ type: 'settle', attr, value: actual, at: this.#now() });
-      this.#dispatch({ type: 'writability', value: confirmed ? 'yes' : 'no' });
-      if (!confirmed) {
-        this.#dispatch({
-          type: 'failure',
-          failure: { kind: 'not-writable', hint: 'setup-in-ember-app' },
-        });
-        this.#log('warn', `Write to ${attr} was accepted but did not take effect`);
+  #flushAllIntents(): void {
+    for (const attr of this.#intents.keys()) void this.#flush(attr);
+  }
+
+  /** One writer per attribute; it loops until the newest intent is on the device. */
+  async #flush(attr: Attribute): Promise<void> {
+    if (this.#flushing.has(attr)) return;
+    this.#flushing.add(attr);
+    try {
+      for (;;) {
+        const intent = this.#intents.get(attr);
+        if (!intent || this.#state.connection.status !== 'connected') return;
+        const current = (): boolean => this.#intents.get(attr) === intent;
+
+        try {
+          await this.#write(intent.char, intent.data);
+          if (!current()) continue;
+
+          let actual = intent.decode(await this.#read(intent.char, WRITE_PRIORITY));
+          if (!current()) continue;
+          let confirmed = intent.equals(actual, intent.value);
+          if (!confirmed) {
+            // Look once more before calling the device read-only; a single odd read
+            // must not put a warning in front of the user.
+            actual = intent.decode(await this.#read(intent.char, WRITE_PRIORITY));
+            if (!current()) continue;
+            confirmed = intent.equals(actual, intent.value);
+          }
+
+          this.#intents.delete(attr);
+          this.#dispatch({ type: 'settle', attr, value: actual, at: this.#now() });
+          this.#dispatch({ type: 'writability', value: confirmed ? 'yes' : 'no' });
+          if (!confirmed) {
+            this.#dispatch({
+              type: 'failure',
+              failure: { kind: 'not-writable', hint: 'setup-in-ember-app' },
+            });
+            this.#log('warn', `Write to ${attr} was accepted but did not take effect`);
+          }
+          this.#emit({ type: 'write', at: this.#now(), attribute: attr, confirmed });
+          for (const waiter of intent.waiters) waiter.resolve({ confirmed });
+        } catch (error) {
+          if (!current()) continue;
+          const failure = error instanceof EmberError ? error.failure : classify(error, `write:${attr}`);
+
+          if (failure.kind === 'disconnected' || this.#state.connection.status !== 'connected') {
+            // Kept, and written again as soon as the link is back.
+            this.#log('info', `Write to ${attr} will be retried after reconnecting`);
+            return;
+          }
+          if (failure.kind === 'timeout' && intent.timeouts < WRITE_TIMEOUT_RETRIES) {
+            intent.timeouts += 1;
+            continue;
+          }
+
+          this.#intents.delete(attr);
+          this.#dispatch({ type: 'revert', attr, value: intent.base });
+          this.#dispatch({ type: 'failure', failure });
+          this.#log('warn', `Write to ${attr} failed`, failure);
+          const rejection = error instanceof EmberError ? error : new EmberError(failure);
+          for (const waiter of intent.waiters) waiter.reject(rejection);
+        }
       }
-      this.#emit({ type: 'write', at: this.#now(), attribute: attr, confirmed });
-      return { confirmed };
-    } catch (error) {
-      this.#dispatch({ type: 'revert', attr, value: previous });
-      const failure = error instanceof EmberError ? error.failure : classify(error, `write:${attr}`);
-      this.#dispatch({ type: 'failure', failure });
-      throw error instanceof EmberError ? error : new EmberError(failure);
+    } finally {
+      this.#flushing.delete(attr);
+    }
+  }
+
+  /** The user let go of the device: unwritten intents are dropped and undone. */
+  #abandonIntents(failure: EmberFailure): void {
+    if (this.#intents.size === 0) return;
+    const intents = [...this.#intents];
+    this.#intents.clear();
+    for (const [attr, intent] of intents) {
+      this.#dispatch({ type: 'revert', attr, value: intent.base });
+      const error = new EmberError(failure);
+      for (const waiter of intent.waiters) waiter.reject(error);
     }
   }
 
@@ -988,19 +1176,29 @@ export class EmberDevice {
    * Determines whether writes take effect, without changing anything: rewrites the
    * current target temperature to itself and checks the read-back.
    */
-  async #probeWritability(): Promise<void> {
+  async #probeWritability(force = false): Promise<void> {
     const current = this.#state.attrs.targetTemp;
     if (current === undefined || !this.#state.capabilities.has('targetTemp')) return;
-    if (this.#state.authInfoMissing) return;
+    if (!force && (this.#state.authInfoMissing || this.#state.writability !== 'unknown')) return;
+    // A real write from the user answers the question better, and racing it would put
+    // the old value back on the device.
+    if (this.#intents.has('targetTemp')) return;
+    const epoch = this.#epochs.get('targetTemp') ?? 0;
+    const untouched = (): boolean =>
+      !this.#intents.has('targetTemp') && (this.#epochs.get('targetTemp') ?? 0) === epoch;
+
     try {
       await this.#write(Char.TARGET_TEMPERATURE, encodeTemperature(current));
+      if (!untouched()) return;
       const readBack = decodeTemperature(await this.#read(Char.TARGET_TEMPERATURE));
+      if (!untouched()) return;
       this.#dispatch({
         type: 'writability',
         value: Math.abs(readBack - current) < 0.02 ? 'yes' : 'no',
       });
-    } catch {
-      this.#dispatch({ type: 'writability', value: 'no' });
+    } catch (error) {
+      // A dropped link says nothing about whether the mug accepts writes.
+      this.#log('debug', 'Writability probe did not finish', classify(error, 'probe'));
     }
   }
 
@@ -1018,7 +1216,7 @@ export class EmberDevice {
       await this.#write(Char.UDSK, encodeUdsk(hex));
       const udsk = decodeUdsk(await this.#read(Char.UDSK, WRITE_PRIORITY));
       this.#dispatch({ type: 'attrs', attrs: { udsk }, at: this.#now() });
-      await this.#probeWritability();
+      await this.#probeWritability(true);
       this.#log('warn', 'Overwrote the device pairing key to force writability');
       return this.#state.writability === 'yes';
     } catch (error) {

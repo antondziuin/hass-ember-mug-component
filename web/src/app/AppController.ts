@@ -215,7 +215,12 @@ export class AppController {
       options.existing ?? new EmberDevice(bluetoothDevice, { store: this.#kv });
     this.#device = device;
     this.#unsubscribeDevice = device.subscribe(() => {
-      this.#set({ deviceState: device.getSnapshot() });
+      const deviceState = device.getSnapshot();
+      // A link that is back makes any earlier connection complaint stale.
+      const recovered =
+        deviceState.connection.status === 'connected' &&
+        this.#state.deviceState.connection.status !== 'connected';
+      this.#set(recovered ? { deviceState, notice: null } : { deviceState });
     });
     this.#set({ device, deviceState: device.getSnapshot() });
 
@@ -233,7 +238,12 @@ export class AppController {
       try {
         await device.connect();
       } catch (error) {
-        this.#set({ notice: error instanceof Error ? error.message : String(error) });
+        // While the device keeps retrying on its own the header already says so; a
+        // notice on top would only linger after the link comes back.
+        const status = device.getSnapshot().connection.status;
+        if (status !== 'reconnecting' && status !== 'connected') {
+          this.#set({ notice: error instanceof Error ? error.message : String(error) });
+        }
       }
     }
   }

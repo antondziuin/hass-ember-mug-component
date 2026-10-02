@@ -4,7 +4,7 @@ import { ConnectScreen } from './ui/ConnectScreen.js';
 import { HistoryView } from './ui/HistoryView.js';
 import { LiveView } from './ui/LiveView.js';
 import { SettingsView } from './ui/SettingsView.js';
-import { Banner } from './ui/components.js';
+import { Toast, ToastHost } from './ui/components.js';
 import { AppProvider, useAppState, useController } from './ui/context.js';
 
 type Tab = 'live' | 'history' | 'settings';
@@ -18,7 +18,9 @@ const TABS: ReadonlyArray<[Tab, string]> = [
 export function App(): JSX.Element {
   return (
     <AppProvider>
-      <Shell />
+      <ToastHost>
+        <Shell />
+      </ToastHost>
     </AppProvider>
   );
 }
@@ -100,9 +102,9 @@ function Shell(): JSX.Element {
 
       <main>
         {state.notice && (
-          <Banner tone="warn" onDismiss={() => controller.dismissNotice()}>
+          <Toast key={state.notice} tone="warn" timeoutMs={6_000} onDismiss={() => controller.dismissNotice()}>
             {state.notice}
-          </Banner>
+          </Toast>
         )}
 
         {tab === 'live' &&

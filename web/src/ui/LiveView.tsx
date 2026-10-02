@@ -26,7 +26,7 @@ import { ALL_MODELS } from '../lib/ember/models.js';
 import type { EmberDevice } from '../lib/ember/emberDevice.js';
 import type { EmberDeviceState } from '../lib/ember/types.js';
 
-import { Banner, Card, Field, Stat, Switch } from './components.js';
+import { Card, Field, Stat, Switch, Toast, useHeld } from './components.js';
 import { useAppState, useController } from './context.js';
 
 export interface LiveViewProps {
@@ -38,7 +38,16 @@ export function LiveView({ unit }: LiveViewProps): JSX.Element {
   const controller = useController();
   const device = state.device;
   const deviceState = state.deviceState;
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; at: number } | null>(null);
+  const [readOnlyDismissed, setReadOnlyDismissed] = useState(false);
+  // Only a verdict that sticks, with nothing still in flight, is worth interrupting for.
+  const readOnly = useHeld(
+    deviceState.writability === 'no' && deviceState.pending.size === 0,
+    1_200,
+  );
+  useEffect(() => {
+    if (deviceState.writability !== 'no') setReadOnlyDismissed(false);
+  }, [deviceState.writability]);
 
   if (!device) return <p className="muted">Not connected.</p>;
 
@@ -50,9 +59,12 @@ export function LiveView({ unit }: LiveViewProps): JSX.Element {
   const showTemp = (celsius: number | undefined): string =>
     celsius === undefined ? '--' : `${value(celsius)}°${unit}`;
 
+  // Fire and forget: the device shows the new value at once and keeps writing it in the
+  // background, through reconnects if need be. Only a definite refusal comes back here.
   const run = (action: () => Promise<unknown>) => () => {
-    setError(null);
-    action().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    action().catch((e: unknown) =>
+      setError({ message: e instanceof Error ? e.message : String(e), at: Date.now() }),
+    );
   };
 
   const liquidLabel =
@@ -68,22 +80,23 @@ export function LiveView({ unit }: LiveViewProps): JSX.Element {
 
   return (
     <div className="stack">
-      <ConnectionBanner state={deviceState} device={device} onDisconnect={() => void controller.disconnect()} />
+      <ConnectionToast state={deviceState} device={device} />
 
-      {deviceState.writability === 'no' && (
-        <Banner
+      {readOnly && !readOnlyDismissed && (
+        <Toast
           tone="warn"
           title="Read-only mug"
           action={<ForceWritableButton device={device} />}
+          onDismiss={() => setReadOnlyDismissed(true)}
         >
-          Changes are ignored until the mug has been set up once in the Ember app.
-        </Banner>
+          Set it up once in the Ember app to allow changes.
+        </Toast>
       )}
 
       {error && (
-        <Banner tone="error" onDismiss={() => setError(null)}>
-          {error}
-        </Banner>
+        <Toast key={error.at} tone="error" timeoutMs={5_000} onDismiss={() => setError(null)}>
+          {error.message}
+        </Toast>
       )}
 
       <Card
@@ -159,54 +172,58 @@ export function LiveView({ unit }: LiveViewProps): JSX.Element {
   );
 }
 
-function ConnectionBanner({
+/**
+ * Link status as a floating toast, shown only once a drop has lasted long enough to
+ * matter. Controls stay usable meanwhile: changes are queued and sent on reconnect.
+ */
+function ConnectionToast({
   state,
   device,
-  onDisconnect,
 }: {
   state: EmberDeviceState;
   device: EmberDevice;
-  onDisconnect: () => void;
 }): JSX.Element | null {
   const connection = state.connection;
-  const [now, setNow] = useState(() => Date.now());
+  const down = connection.status !== 'connected';
+  const visible = useHeld(down, 1_500);
+  const [attempt, setAttempt] = useState(0);
+  // The first link of a session is "connecting", not "reconnecting".
+  const [everConnected, setEverConnected] = useState(connection.status === 'connected');
 
   useEffect(() => {
-    if (connection.status !== 'reconnecting') return undefined;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [connection.status]);
+    if (connection.status === 'reconnecting') setAttempt(connection.attempt);
+    if (connection.status === 'connected') {
+      setAttempt(0);
+      setEverConnected(true);
+    }
+  }, [connection]);
 
-  if (connection.status === 'connected') return null;
+  if (!visible) return null;
+
+  if (!everConnected && connection.status !== 'reconnecting' && connection.status !== 'disconnected') {
+    return <Toast title="Connecting…" />;
+  }
 
   const retry = (
-    <div className="row">
-      <button type="button" className="primary" onClick={() => void device.reconnectNow()}>
-        Retry
-      </button>
-      <button type="button" className="ghost" onClick={onDisconnect}>
-        Disconnect
-      </button>
-    </div>
+    <button type="button" onClick={() => void device.reconnectNow()}>
+      Retry
+    </button>
   );
 
-  if (connection.status === 'reconnecting') {
-    const seconds = Math.max(Math.round((connection.nextRetryAt - now) / 1000), 0);
+  if (connection.status === 'disconnected') {
     return (
-      <Banner tone="warn" title="Reconnecting" action={retry}>
-        Attempt {connection.attempt}, next in {seconds}s.
-        {connection.attempt >= CONNECT_FAILURES_BEFORE_HINT &&
-          ' Close the Ember phone app if it is open — the mug allows one connection.'}
-      </Banner>
+      <Toast tone="warn" title="Disconnected" action={retry}>
+        Showing last readings.
+      </Toast>
     );
   }
-  if (connection.status === 'connecting' || connection.status === 'discovering') {
-    return <Banner tone="info">Connecting…</Banner>;
-  }
+
+  const pending = state.pending.size > 0;
   return (
-    <Banner tone="warn" title="Disconnected" action={retry}>
-      Showing last readings.
-    </Banner>
+    <Toast tone="warn" title="Reconnecting…" action={retry}>
+      {pending ? 'Your changes will be applied once the mug is back.' : 'Showing last readings.'}
+      {attempt >= CONNECT_FAILURES_BEFORE_HINT && ' Close the Ember app if it is open.'}
+    </Toast>
   );
 }
 
@@ -269,12 +286,21 @@ function TargetControls({
   const display = (celsius: number): string =>
     unit === 'F' ? `${Math.round(celsiusToFahrenheit(celsius))}°F` : `${celsius.toFixed(1)}°C`;
 
+  const commit = (): void => {
+    if (controlOn && Math.abs(draft - target) < 0.005) return;
+    onRun(() => device.setTargetTemp(draft))();
+  };
+
   return (
     <Card
       title="Heating"
       actions={
         <>
-          {state.pending.has('targetTemp') && <span className="subtle small">Saving…</span>}
+          <span
+            className={`sync-dot${state.pending.has('targetTemp') ? ' on' : ''}`}
+            title="Saving to the mug"
+            aria-hidden="true"
+          />
           <Switch
             label="Temperature control"
             checked={controlOn}
@@ -296,8 +322,8 @@ function TargetControls({
           aria-label="Target temperature"
           style={{ '--fill': `${((draft - MIN_TEMP_C) / (MAX_TEMP_C - MIN_TEMP_C)) * 100}%` } as CSSProperties}
           onChange={(event) => setDraft(Number(event.target.value))}
-          onPointerUp={onRun(() => device.setTargetTemp(draft))}
-          onKeyUp={onRun(() => device.setTargetTemp(draft))}
+          onPointerUp={commit}
+          onKeyUp={commit}
         />
         <div className="range-ends" aria-hidden="true">
           <span>{display(MIN_TEMP_C)}</span>

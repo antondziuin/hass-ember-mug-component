@@ -25,6 +25,9 @@ Each of these must show the new value and keep it after the next poll:
 
 - [ ] Move the target temperature slider.
 - [ ] Tap each preset (Latte through Green tea).
+- [ ] Tap several presets as fast as you can. The readout follows every tap with no
+      flash of an older value, the mug ends on the last one, and no "Read-only" message
+      appears.
 - [ ] Turn temperature control off — target shows "Off".
 - [ ] Turn it back on — the previous target returns, not a default.
 - [ ] Change the LED colour; the mug's light changes.
@@ -34,8 +37,8 @@ Each of these must show the new value and keep it after the next poll:
 - [ ] Type a name with an accent (for example `caffè`) — it must be rejected inline
       without a write being attempted.
 
-If any write is accepted but reverts, the app should raise the "ignoring changes" banner.
-That means the mug has never been set up in the Ember app.
+If writes are accepted but keep reverting, the app shows a "Read-only mug" toast at the
+bottom of the screen. That means the mug has never been set up in the Ember app.
 
 ## 3. A real brew
 
@@ -50,12 +53,14 @@ That means the mug has never been set up in the Ember app.
 
 ## 4. Connection resilience
 
-- [ ] Walk out of range mid-session. A reconnect banner appears with an attempt counter
-      and a countdown.
-- [ ] Walk back. It reconnects on its own, without any interaction.
+- [ ] Walk out of range mid-session. After a second or so a "Reconnecting…" toast
+      appears at the bottom; nothing on the page moves.
+- [ ] While it is reconnecting, change the target. The new value shows at once.
+- [ ] Walk back. It reconnects on its own, the toast disappears, and the mug takes the
+      target you set while it was away.
 - [ ] Open the Ember phone app and connect to the mug while the page is connected. Expect
-      disconnects; after three failed attempts the banner should mention the phone app.
-- [ ] Close the phone app; the page recovers.
+      disconnects; after three failed attempts the toast should mention the phone app.
+- [ ] Close the phone app; the page recovers and no error message is left behind.
 
 ## 5. Reload behaviour
 
