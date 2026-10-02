@@ -212,9 +212,7 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
 
   if (!deviceId) {
     return (
-      <EmptyState title="No history yet">
-        Connect the mug once and readings will start being recorded.
-      </EmptyState>
+      <EmptyState title="No history yet">Connect a mug to start recording.</EmptyState>
     );
   }
 
@@ -225,7 +223,7 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
         subtitle={window ? formatHistoryCaption(mode, window) : undefined}
         actions={
           <div className="history-toolbar">
-            <div className="segmented wrap" role="group" aria-label="Range">
+            <div className="segmented" role="group" aria-label="Range">
               {HISTORY_MODES.map((preset) => (
                 <button
                   key={preset.id}
@@ -238,22 +236,26 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
               ))}
             </div>
             {isShiftableMode(mode) && (
-              <div className="row">
+              <div className="row" style={{ gap: '0.15rem' }}>
                 <button
                   type="button"
-                  className="ghost"
+                  className="ghost icon"
+                  aria-label="Previous"
+                  title="Previous"
                   disabled={!shift.prev}
                   onClick={() => setOffset((value) => value + 1)}
                 >
-                  Previous
+                  ‹
                 </button>
                 <button
                   type="button"
-                  className="ghost"
+                  className="ghost icon"
+                  aria-label="Next"
+                  title="Next"
                   disabled={!shift.next}
                   onClick={() => setOffset((value) => Math.max(value - 1, 0))}
                 >
-                  Next
+                  ›
                 </button>
               </div>
             )}
@@ -266,10 +268,10 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
         }
       >
         {error && <p className="field-error">{error}</p>}
-        {pending && !loaded && <Spinner label="Reading history…" />}
+        {pending && !loaded && <Spinner label="Loading…" />}
         {!pending && !loaded && !error && (
           <EmptyState title="Nothing recorded yet">
-            Readings are stored while the mug is connected and this tab is open.
+            Readings are saved while the mug is connected and this tab is open.
           </EmptyState>
         )}
 
@@ -282,19 +284,24 @@ export function HistoryView({ unit }: { unit: 'C' | 'F' }): JSX.Element {
                 zoomTo(fromSeconds * 1000, toSeconds * 1000);
               }}
             />
-            <p className="muted small">
-              Drag to zoom · scroll to zoom around the cursor · shift+scroll to pan · double-click
-              to reset
-            </p>
+            <div className="row between">
+              <StateLegend />
+              <span
+                className="subtle small"
+                title="Drag or scroll to zoom · shift+scroll to pan · double-click to reset"
+              >
+                Drag to zoom · double-click to reset
+              </span>
+            </div>
             {loaded.overview && window && (
               <BrushStrip
                 frame={loaded.overview}
                 bounds={loaded.bounds}
                 selection={window}
+                height={36}
                 onSelect={(from, to) => zoomTo(from, to)}
               />
             )}
-            <StateLegend />
           </>
         )}
       </Card>

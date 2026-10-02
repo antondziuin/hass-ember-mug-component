@@ -61,10 +61,7 @@ function Shell(): JSX.Element {
       <header className="app-head">
         <div className="brand">
           <span className="mark" aria-hidden="true" />
-          <div>
-            <h1>Ember Mug</h1>
-            <p className="muted small">Bluetooth, straight from the browser</p>
-          </div>
+          <h1>Ember</h1>
         </div>
 
         <nav className="tabs" aria-label="Sections">
@@ -82,7 +79,11 @@ function Shell(): JSX.Element {
         </nav>
 
         <div className="app-tools">
-          <div className="segmented" role="group" aria-label="Display unit">
+          <div className="status" title={status.title}>
+            <span className={`dot${status.dot}`} aria-hidden="true" />
+            <span className="small muted status-label">{status.label}</span>
+          </div>
+          <div className="segmented compact" role="group" aria-label="Display unit">
             {(['C', 'F'] as const).map((value) => (
               <button
                 key={value}
@@ -93,10 +94,6 @@ function Shell(): JSX.Element {
                 °{value}
               </button>
             ))}
-          </div>
-          <div className="status" title={status.title}>
-            <span className={`dot${status.dot}`} aria-hidden="true" />
-            <span className="small muted">{status.label}</span>
           </div>
         </div>
       </header>
@@ -118,12 +115,11 @@ function Shell(): JSX.Element {
         {tab === 'settings' && <SettingsView />}
       </main>
 
-      <footer className="muted small">
-        Not affiliated with Ember. Protocol details come from the{' '}
+      <footer className="small">
+        Unofficial · protocol from{' '}
         <a href="https://github.com/sopelj/python-ember-mug" target="_blank" rel="noreferrer">
           python-ember-mug
-        </a>{' '}
-        project.
+        </a>
       </footer>
     </div>
   );
@@ -136,15 +132,15 @@ function connectionStatus(
 ): { label: string; title: string; dot: string } {
   if (connection.status === 'connected') {
     return {
-      label: recording ? 'Connected · recording' : 'Connected',
-      title: recording ? 'Recording history' : 'Connected',
+      label: recording ? 'Recording' : 'Connected',
+      title: recording ? 'Connected and recording history' : 'Connected',
       dot: ' dot-live',
     };
   }
   if (connection.status === 'reconnecting') {
     return {
-      label: `Reconnecting · ${connection.attempt ?? 1}`,
-      title: 'Trying to restore the link',
+      label: 'Reconnecting',
+      title: `Trying to restore the link (attempt ${connection.attempt ?? 1})`,
       dot: ' dot-warn',
     };
   }
@@ -152,9 +148,9 @@ function connectionStatus(
     return { label: 'Connecting', title: 'Opening a Bluetooth session', dot: ' dot-warn' };
   }
   if (isLeader === false) {
-    return { label: 'Recording in another tab', title: 'This tab is not the writer', dot: '' };
+    return { label: 'Other tab', title: 'Recording in another tab', dot: '' };
   }
-  return { label: 'Idle', title: 'Not recording', dot: '' };
+  return { label: 'Offline', title: 'Not connected', dot: '' };
 }
 
 function readTab(): Tab {

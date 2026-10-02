@@ -6,7 +6,7 @@
  * Travel Mug shows volume instead of an LED colour.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 
 import {
   CONNECT_FAILURES_BEFORE_HINT,
@@ -26,7 +26,7 @@ import { ALL_MODELS } from '../lib/ember/models.js';
 import type { EmberDevice } from '../lib/ember/emberDevice.js';
 import type { EmberDeviceState } from '../lib/ember/types.js';
 
-import { Banner, Card, Field, Stat } from './components.js';
+import { Banner, Card, Field, Stat, Switch } from './components.js';
 import { useAppState, useController } from './context.js';
 
 export interface LiveViewProps {
@@ -44,11 +44,11 @@ export function LiveView({ unit }: LiveViewProps): JSX.Element {
 
   const connected = deviceState.connection.status === 'connected';
   const stale = !connected;
-  const showTemp = (celsius: number | undefined): string => {
-    if (celsius === undefined) return '--';
-    const value = unit === 'F' ? celsiusToFahrenheit(celsius) : celsius;
-    return `${value.toFixed(1)}°${unit}`;
-  };
+  const { attrs } = deviceState;
+  const value = (celsius: number): string =>
+    (unit === 'F' ? celsiusToFahrenheit(celsius) : celsius).toFixed(1);
+  const showTemp = (celsius: number | undefined): string =>
+    celsius === undefined ? '--' : `${value(celsius)}°${unit}`;
 
   const run = (action: () => Promise<unknown>) => () => {
     setError(null);
@@ -56,9 +56,15 @@ export function LiveView({ unit }: LiveViewProps): JSX.Element {
   };
 
   const liquidLabel =
-    deviceState.attrs.liquidState === undefined || deviceState.attrs.liquidState === null
+    attrs.liquidState === undefined || attrs.liquidState === null
       ? undefined
-      : LIQUID_STATE_LABEL[deviceState.attrs.liquidState];
+      : LIQUID_STATE_LABEL[attrs.liquidState];
+  const targetOn = attrs.targetTemp !== undefined && attrs.targetTemp > 0;
+  const hasDeviceSettings =
+    deviceState.capabilities.has('name') ||
+    deviceState.capabilities.has('ledColour') ||
+    deviceState.capabilities.has('volumeLevel') ||
+    deviceState.capabilities.has('temperatureUnit');
 
   return (
     <div className="stack">
@@ -67,11 +73,10 @@ export function LiveView({ unit }: LiveViewProps): JSX.Element {
       {deviceState.writability === 'no' && (
         <Banner
           tone="warn"
-          title="This mug is ignoring changes"
+          title="Read-only mug"
           action={<ForceWritableButton device={device} />}
         >
-          The mug accepts the write and then discards it. Ember devices stay read-only until they
-          have been set up once in the official Ember app.
+          Changes are ignored until the mug has been set up once in the Ember app.
         </Banner>
       )}
 
@@ -82,7 +87,7 @@ export function LiveView({ unit }: LiveViewProps): JSX.Element {
       )}
 
       <Card
-        title={deviceState.attrs.name || deviceState.bleName || 'Ember mug'}
+        title={attrs.name || deviceState.bleName || 'Ember mug'}
         subtitle={<ModelLine state={deviceState} />}
         actions={
           <button type="button" className="ghost" onClick={() => void controller.disconnect()}>
@@ -91,67 +96,49 @@ export function LiveView({ unit }: LiveViewProps): JSX.Element {
         }
       >
         <div className={`hero${stale ? ' stale' : ''}`}>
-          <div>
-            <div className="hero-temp">{showTemp(deviceState.attrs.currentTemp)}</div>
-            <p className="muted small">Current temperature</p>
+          <div className="hero-temp" aria-label={`Current temperature ${showTemp(attrs.currentTemp)}`}>
+            {attrs.currentTemp === undefined ? '--' : value(attrs.currentTemp)}
+            <span className="unit">°{unit}</span>
           </div>
           <div className="hero-meta">
             {liquidLabel && (
               <span
-                className={`chip-state${deviceState.attrs.liquidState === LiquidState.PERFECT ? ' good' : ''}`}
+                className={`chip-state${attrs.liquidState === LiquidState.PERFECT ? ' good' : ''}`}
               >
                 {liquidLabel}
               </span>
             )}
             <span className="muted">
-              Target{' '}
-              {deviceState.attrs.targetTemp === 0 || deviceState.attrs.targetTemp === undefined
-                ? 'off'
-                : showTemp(deviceState.attrs.targetTemp)}
+              {targetOn ? `Target ${showTemp(attrs.targetTemp)}` : 'Heating off'}
             </span>
           </div>
         </div>
+        <hr className="divider" />
         <div className={`readings${stale ? ' stale' : ''}`}>
           <Stat
             label="Liquid"
             value={
-              deviceState.attrs.liquidLevel === undefined
+              attrs.liquidLevel === undefined
                 ? '--'
-                : `${Math.round(
-                    liquidLevelPercent(deviceState.attrs.liquidLevel, device.liquidLevelMax),
-                  )}%`
-            }
-            hint={
-              deviceState.attrs.liquidLevel === undefined
-                ? undefined
-                : `raw ${deviceState.attrs.liquidLevel}/${device.liquidLevelMax}`
+                : `${Math.round(liquidLevelPercent(attrs.liquidLevel, device.liquidLevelMax))}%`
             }
           />
           <Stat
             label="Battery"
-            value={
-              deviceState.attrs.battery ? `${deviceState.attrs.battery.percent.toFixed(0)}%` : '--'
-            }
-            hint={deviceState.attrs.battery?.onChargingBase ? 'On charger' : 'Off charger'}
-            tone={
-              deviceState.attrs.battery && deviceState.attrs.battery.percent < 15 ? 'warn' : 'default'
-            }
+            value={attrs.battery ? `${attrs.battery.percent.toFixed(0)}%` : '--'}
+            hint={attrs.battery?.onChargingBase ? 'On charger' : undefined}
+            tone={attrs.battery && attrs.battery.percent < 15 ? 'warn' : 'default'}
           />
           {deviceState.capabilities.has('batteryVoltage') && (
-            <Stat label="Voltage" value={deviceState.attrs.batteryVoltage ?? '--'} />
+            <Stat label="Voltage" value={attrs.batteryVoltage ?? '--'} />
           )}
         </div>
       </Card>
 
-      <Card title="Temperature">
-        <TargetControls device={device} state={deviceState} unit={unit} onRun={run} />
-      </Card>
+      <TargetControls device={device} state={deviceState} unit={unit} onRun={run} />
 
-      {(deviceState.capabilities.has('name') ||
-        deviceState.capabilities.has('ledColour') ||
-        deviceState.capabilities.has('volumeLevel') ||
-        deviceState.capabilities.has('temperatureUnit')) && (
-        <Card title="Device settings">
+      {hasDeviceSettings && (
+        <Card title="Mug">
           <div className="grid">
             {deviceState.capabilities.has('name') && (
               <NameControl device={device} state={deviceState} onRun={run} />
@@ -195,10 +182,10 @@ function ConnectionBanner({
   const retry = (
     <div className="row">
       <button type="button" className="primary" onClick={() => void device.reconnectNow()}>
-        Retry now
+        Retry
       </button>
       <button type="button" className="ghost" onClick={onDisconnect}>
-        Give up
+        Disconnect
       </button>
     </div>
   );
@@ -207,9 +194,9 @@ function ConnectionBanner({
     const seconds = Math.max(Math.round((connection.nextRetryAt - now) / 1000), 0);
     return (
       <Banner tone="warn" title="Reconnecting" action={retry}>
-        Attempt {connection.attempt}; next try in {seconds}s.
+        Attempt {connection.attempt}, next in {seconds}s.
         {connection.attempt >= CONNECT_FAILURES_BEFORE_HINT &&
-          ' If the Ember phone app is connected, close it — the mug only accepts one connection at a time.'}
+          ' Close the Ember phone app if it is open — the mug allows one connection.'}
       </Banner>
     );
   }
@@ -218,7 +205,7 @@ function ConnectionBanner({
   }
   return (
     <Banner tone="warn" title="Disconnected" action={retry}>
-      Showing the last readings received.
+      Showing last readings.
     </Banner>
   );
 }
@@ -231,7 +218,7 @@ function ModelLine({ state }: { state: EmberDeviceState }): JSX.Element {
 
   return (
     <span className="row small">
-      <span>{spec?.displayName ?? 'Ember device'}</span>
+      <span>{spec?.displayName ?? 'Ember'}</span>
       {detection && detection.confidence !== 'exact' && (
         <select
           value={detection.model ?? ''}
@@ -243,7 +230,7 @@ function ModelLine({ state }: { state: EmberDeviceState }): JSX.Element {
           }}
           aria-label="Set the exact model"
         >
-          <option value="">Which model is this?</option>
+          <option value="">Select model</option>
           {ALL_MODELS.map((model) => (
             <option key={model.model} value={model.model}>
               {model.displayName}
@@ -251,8 +238,8 @@ function ModelLine({ state }: { state: EmberDeviceState }): JSX.Element {
           ))}
         </select>
       )}
-      {serial && <span className="muted">· {serial}</span>}
-      {state.attrs.firmware && <span className="muted">· fw {state.attrs.firmware.version}</span>}
+      {serial && <span className="subtle">{serial}</span>}
+      {state.attrs.firmware && <span className="subtle">v{state.attrs.firmware.version}</span>}
     </span>
   );
 }
@@ -283,23 +270,22 @@ function TargetControls({
     unit === 'F' ? `${Math.round(celsiusToFahrenheit(celsius))}°F` : `${celsius.toFixed(1)}°C`;
 
   return (
-    <div className="stack">
-      <div className="row">
-        <button
-          type="button"
-          className={controlOn ? 'primary' : 'ghost'}
-          disabled={!writable}
-          onClick={onRun(() => device.setTemperatureControl(!controlOn))}
-        >
-          {controlOn ? 'Temperature control is on' : 'Temperature control is off'}
-        </button>
-        {state.pending.has('targetTemp') && <span className="muted small">saving…</span>}
-      </div>
-
-      <Field
-        label={`Target ${display(draft)}`}
-        hint={`${MIN_TEMP_C}–${MAX_TEMP_C} °C is the range the mug accepts.`}
-      >
+    <Card
+      title="Heating"
+      actions={
+        <>
+          {state.pending.has('targetTemp') && <span className="subtle small">Saving…</span>}
+          <Switch
+            label="Temperature control"
+            checked={controlOn}
+            disabled={!writable}
+            onChange={(next) => onRun(() => device.setTemperatureControl(next))()}
+          />
+        </>
+      }
+    >
+      <div className="stack tight">
+        <span className="target-value">{display(draft)}</span>
         <input
           type="range"
           min={MIN_TEMP_C}
@@ -307,27 +293,33 @@ function TargetControls({
           step={0.1}
           value={draft}
           disabled={!writable}
+          aria-label="Target temperature"
+          style={{ '--fill': `${((draft - MIN_TEMP_C) / (MAX_TEMP_C - MIN_TEMP_C)) * 100}%` } as CSSProperties}
           onChange={(event) => setDraft(Number(event.target.value))}
           onPointerUp={onRun(() => device.setTargetTemp(draft))}
           onKeyUp={onRun(() => device.setTargetTemp(draft))}
         />
-      </Field>
+        <div className="range-ends" aria-hidden="true">
+          <span>{display(MIN_TEMP_C)}</span>
+          <span>{display(MAX_TEMP_C)}</span>
+        </div>
+      </div>
 
       <div className="chips">
         {DEFAULT_PRESETS.map((preset) => (
           <button
             key={preset.id}
             type="button"
-            className={`chip${Math.abs(target - preset.celsius) < 0.05 ? ' active' : ''}`}
+            className={`chip${controlOn && Math.abs(target - preset.celsius) < 0.05 ? ' active' : ''}`}
             disabled={!writable}
             onClick={onRun(() => device.setTargetTemp(preset.celsius))}
           >
             {preset.label}
-            <span className="muted small"> {display(preset.celsius)}</span>
+            <span className="subtle">{display(preset.celsius)}</span>
           </button>
         ))}
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -349,11 +341,11 @@ function NameControl({
   return (
     <Field
       label="Name"
-      hint="Up to 16 characters."
-      error={draft.length > 0 && !valid ? 'That character is not allowed on the mug.' : undefined}
+      error={draft.length > 0 && !valid ? 'Unsupported character.' : undefined}
     >
-      <div className="row">
+      <div className="row" style={{ flexWrap: 'nowrap' }}>
         <input
+          style={{ flex: 1 }}
           value={draft}
           maxLength={16}
           onChange={(event) => setDraft(event.target.value)}
@@ -361,7 +353,6 @@ function NameControl({
         />
         <button
           type="button"
-          className="ghost"
           disabled={!valid || draft === current || state.writability === 'no'}
           onClick={onRun(() => device.setName(draft))}
         >
@@ -395,7 +386,7 @@ function LedControl({
   );
 
   return (
-    <Field label="LED colour" hint="The LED cannot be switched off, only recoloured.">
+    <Field label="LED colour">
       <div className="row">
         <input
           type="color"
@@ -410,7 +401,7 @@ function LedControl({
             }, 280);
           }}
         />
-        <code className="muted">{draft}</code>
+        <code className="muted">{draft.toUpperCase()}</code>
       </div>
     </Field>
   );
@@ -454,10 +445,7 @@ function UnitControl({
   onRun: Runner;
 }): JSX.Element {
   return (
-    <Field
-      label="Unit shown on the mug"
-      hint="This is the mug's own display unit, used by the Ember app. It does not change this page."
-    >
+    <Field label="Unit on mug" hint="Used by the Ember app, not this page.">
       <div className="segmented">
         {([TemperatureUnit.CELSIUS, TemperatureUnit.FAHRENHEIT] as const).map((value) => (
           <button
@@ -488,17 +476,14 @@ function ForceWritableButton({ device }: { device: EmberDevice }): JSX.Element {
   if (!confirming) {
     return (
       <button type="button" className="ghost" onClick={() => setConfirming(true)}>
-        Try to force it
+        Force
       </button>
     );
   }
 
   return (
     <div className="row">
-      <span className="small">
-        This overwrites the mug&apos;s pairing key. The Ember phone app will most likely have to
-        add the mug again.
-      </span>
+      <span className="small">Overwrites the pairing key; the Ember app will need to re-add the mug.</span>
       <button
         type="button"
         className="danger"
@@ -511,7 +496,7 @@ function ForceWritableButton({ device }: { device: EmberDevice }): JSX.Element {
           });
         }}
       >
-        {busy ? 'Working…' : 'I understand, do it'}
+        {busy ? 'Working…' : 'Overwrite'}
       </button>
       <button type="button" className="ghost" onClick={() => setConfirming(false)}>
         Cancel

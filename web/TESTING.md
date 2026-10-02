@@ -73,7 +73,7 @@ That means the mug has never been set up in the Ember app.
       storage as persistent. If it does not, keep using the app and check again — Chrome
       grants it on engagement.
 - [ ] `npm run db:start`, open `http://localhost:41821`, go to Settings → Local server →
-      **Test connection**.
+      **Test**.
 - [ ] Press **Move history here**. Watch the progress bar; confirm the row count matches
       and the charts look identical before and after.
 - [ ] Run the same migration again: everything should be reported as already present, with
